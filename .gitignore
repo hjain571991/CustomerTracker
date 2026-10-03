@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-ssr/
+.vite/
+.vercel/
+.netlify/
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+
+# Databricks-internal npm proxy config — never commit (leaks internal URL)
+.npmrc
