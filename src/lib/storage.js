@@ -13,15 +13,19 @@ export function loadSaved() {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.customers) || !parsed.customers.length) return null;
-    return { customers: parsed.customers, reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [] };
+    return {
+      customers: parsed.customers,
+      actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+      reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
+    };
   } catch {
     return null; // corrupt or unavailable storage falls back to the seed file
   }
 }
 
-export function save(customers, reminders) {
+export function save(customers, actions, reminders) {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ customers, reminders }));
+    localStorage.setItem(KEY, JSON.stringify({ customers, actions, reminders }));
   } catch {
     // Private mode or a full quota — the session still works, it just won't persist.
   }

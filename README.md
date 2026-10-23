@@ -19,7 +19,7 @@ Vite prints a second `Network:` URL — open that on your phone (same Wi-Fi) to
 try it on a real device.
 
 ```bash
-npm test         # 85 logic checks + the spreadsheet pipeline
+npm test         # 93 logic checks + the spreadsheet pipeline
 npm run build    # generates icons, then builds to dist/
 npm run preview  # serve dist/ locally
 ```
@@ -68,51 +68,51 @@ site data resets the PIN.
 
 ## The data lives in a spreadsheet
 
-Customers are no longer hardcoded. Two CSVs in `public/data/` are the app's
-starting list:
+Three tables, whether they arrive as CSV files or Google Sheet tabs:
 
-**`public/data/customers.csv`**
+| table | columns |
+|---|---|
+| `customers` | customer_id, name, phone, initials, visit_every_weeks, last_call_date, last_call_reason, last_call_note, snoozed_until |
+| `actions` | action_id, customer_id, visit_date, is_logged, logged_at |
+| `reminders` | reminder_id, customer_id, customer_name, due_date, note |
 
-| column | required | notes |
-|---|---|---|
-| `name` | yes | shop or customer name; also the key reminders join on |
-| `phone` | no | powers the tap-to-call buttons |
-| `initials` | no | blank means "derive from the name" |
-| `visit_every_weeks` | no | **the cadence** — 1 weekly, 2 fortnightly; blank uses the app default |
-| `visit_dates` | no | several dates in one cell, separated by `\|` |
-| `last_call_date` | no | when you last rang them |
-| `last_call_reason` | no | what they said — one of the fixed reasons |
-| `last_call_note` | no | free text against that call |
-| `snoozed_until` | no | hidden from the follow-up list until this date |
+**`customer_id` is the join key.** A stable number the app assigns and never
+reuses — not derived from the name, so renaming a shop no longer orphans its
+visits and reminders.
 
-```csv
-name,phone,initials,visit_every_weeks,visit_dates,last_call_date,last_call_reason
-Rajesh Traders,9820011223,,2,2026-09-03 | 2026-08-20 | 2026-08-07,2026-08-31,price
-Ganesh Ornaments,9845567788,,4,2026-09-01,,
-```
+**A visit is an action row, not a cell.** Undoing or deleting one flips
+`is_logged` to 0 rather than removing the row, so the log keeps a record of
+what was tapped and what was taken back.
 
-**`public/data/reminders.csv`** — `customer_name`, `due_date`, `note`.
+### Google Sheet as the database
 
-Both are forgiving about how you write them:
+Set up in five minutes — see [`google-apps-script/README.md`](google-apps-script/README.md).
+An Apps Script web app deployed from the sheet gives the app a URL to call, so
+there is no backend to host, no Google Cloud project, and **staff never sign
+into anything**.
 
-- **Headers** ignore case, spaces and underscores, and accept synonyms —
-  `Customer Name`, `mobile`, `Visit Dates`, `frequency` all resolve correctly.
-- **Dates** can be `2026-09-05`, `05/09/2026` (day-first), or a real Excel date
-  cell. Anything unparseable is skipped rather than guessed at.
-- **Repeated names merge**, so a sheet kept as one row per visit works as well
-  as one row per customer.
+Once connected:
 
-### Editing the data
+- every tap, call, reminder and new customer is written to the sheet
+- the write is queued and sent in the background, so the screen never waits
+- queued changes survive being offline and go up on the next sync
+- the app re-reads the sheet on open, on returning to the foreground, when the
+  connection returns, and on demand
+- writes are per row, so a cell you edit by hand is not clobbered
 
-Three ways, in increasing order of convenience:
+Settings → Google Sheet shows the connection, how many changes are waiting, and
+a Sync button.
 
-1. **In the app** — Owner View → **Data** → *Import spreadsheet*. Accepts
-   `.csv`, `.xlsx` and `.xls`. An `.xlsx` with sheets named `customers` and
-   `reminders` brings both across. This is the one to use day to day.
-2. **Edit the CSVs** in `public/data/` and redeploy. This changes what a *new*
-   device sees on first run.
-3. **Export first** — Owner View → **Data** → *Export as Excel* gives you the
-   current state as a two-sheet workbook to edit and re-import.
+### Without a sheet
+
+The app still works entirely on the device. `public/data/*.csv` seed the first
+run, everything persists to `localStorage`, and Settings → Files exports the
+three CSVs or a three-tab `.xlsx`.
+
+Header matching stays forgiving: case, spaces, underscores and synonyms all
+resolve (`Customer Name`, `mobile`, `frequency`). Dates may be `2026-09-05` or
+`05/09/2026`. A sheet with no `actions` tab falls back to packed `visit_dates`
+cells, so older exports still open.
 
 ### Why dates, not "days ago"
 
@@ -211,6 +211,9 @@ src/lib/visits.js     adding and removing a visit; the undo rules
 src/lib/visitLog.js   every visit flattened and grouped by day
 src/lib/visitCounts.js how many visits in the last 4 weeks / 3 / 6 / 12 months
 src/lib/reports.js    book-wide: visit counts per customer, churn reasons
+src/lib/sheets.js     the Apps Script client and row builders
+src/lib/sync.js       outbox queue, flush-then-read
+google-apps-script/   the sheet backend and its setup guide
 src/components/       Avatar, Sheet, DayStepper, PinPad, the bottom sheets
 src/screens/          StaffHome, PinGate, FollowUps, Customers, Detail, Add, Reports, VisitLog, Settings
 src/App.jsx           data loading, state, navigation shell

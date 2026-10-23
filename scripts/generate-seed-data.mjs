@@ -214,14 +214,19 @@ const cell = (v) => {
 };
 const toCsv = (header, rows) => [header, ...rows].map((r) => r.map(cell).join(",")).join("\n") + "\n";
 
+// Ids are assigned here so they match what the app and the sheet will use.
+customers.forEach((c, i) => {
+  c.id = i + 1;
+});
+
 const customersCsv = toCsv(
-  ["name", "phone", "initials", "visit_every_weeks", "visit_dates", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
+  ["customer_id", "name", "phone", "initials", "visit_every_weeks", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
   customers.map((c) => [
+    c.id,
     c.name,
     c.phone,
     "", // blank => derived from the name
     c.every, // weeks; blank => falls back to the app-wide default
-    c.visits.map(iso).join(" | "),
     c.call ? iso(c.call.calledDaysAgo) : "",
     c.call?.reason || "",
     c.call?.note || "",
@@ -229,12 +234,28 @@ const customersCsv = toCsv(
   ])
 );
 
+// One row per visit — the shape the Google Sheet's `actions` tab uses.
+let actionSeq = 0;
+const actionsCsv = toCsv(
+  ["action_id", "customer_id", "visit_date", "is_logged", "logged_at"],
+  customers.flatMap((c) =>
+    [...c.visits].sort((a, b) => b - a).map((d) => {
+      actionSeq += 1;
+      return [`a${actionSeq}`, c.id, iso(d), 1, ""];
+    })
+  )
+);
+
+const idByName = new Map(customers.map((c) => [c.name, c.id]));
 const remindersCsv = toCsv(
-  ["customer_name", "due_date", "note"],
-  reminders.map((r) => [r.customer, iso(-r.dueInDays), r.note])
+  ["reminder_id", "customer_id", "customer_name", "due_date", "note"],
+  reminders.map((r, i) => [`r${i + 1}`, idByName.get(r.customer) || "", r.customer, iso(-r.dueInDays), r.note])
 );
 
 mkdirSync(dataDir, { recursive: true });
 writeFileSync(resolve(dataDir, "customers.csv"), customersCsv);
+writeFileSync(resolve(dataDir, "actions.csv"), actionsCsv);
 writeFileSync(resolve(dataDir, "reminders.csv"), remindersCsv);
-console.log(`Seeded ${customers.length} customers and ${reminders.length} reminders (anchored to ${iso(0)})`);
+console.log(
+  `Seeded ${customers.length} customers, ${actionSeq} actions and ${reminders.length} reminders (anchored to ${iso(0)})`
+);

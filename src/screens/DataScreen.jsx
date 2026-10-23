@@ -1,10 +1,11 @@
 import React, { useRef, useState } from "react";
 import { AlertCircle, Download, FileSpreadsheet, KeyRound, RefreshCw, RotateCcw, Upload } from "lucide-react";
 import { T, tint } from "../theme.js";
-import { DataError, downloadCustomersCsv, downloadWorkbook, parseFile } from "../lib/dataSource.js";
+import { DataError, downloadCsvs, downloadWorkbook, parseFile } from "../lib/dataSource.js";
 import { formatDate } from "../lib/dates.js";
 import { DEFAULT_PIN } from "../lib/pin.js";
 import CadencePicker from "../components/CadencePicker.jsx";
+import SheetConnection from "../components/SheetConnection.jsx";
 
 /**
  * Owner-only housekeeping: the spreadsheet (import a sheet, take a backup out,
@@ -12,6 +13,7 @@ import CadencePicker from "../components/CadencePicker.jsx";
  */
 export default function DataScreen({
   customers,
+  actions,
   reminders,
   replaceData,
   reloadSeed,
@@ -21,6 +23,11 @@ export default function DataScreen({
   resetPin,
   settings,
   updateSettings,
+  sheetConfig,
+  saveSheet,
+  sync,
+  outboxCount,
+  onRefresh,
 }) {
   const fileRef = useRef(null);
   const [error, setError] = useState(null);
@@ -66,6 +73,7 @@ export default function DataScreen({
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 16, marginBottom: 14 }}>
         <Stat label="Customers" value={customers.length} />
         <Stat label="Reminders" value={reminders.length} />
+        <Stat label="Actions logged" value={actions.length} />
         <Stat label="Visits logged" value={customers.reduce((n, c) => n + c.visits.length, 0)} />
         <Stat
           label="Loaded from"
@@ -84,7 +92,17 @@ export default function DataScreen({
 
       <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" onChange={onFile} style={{ display: "none" }} />
 
-      <SectionLabel>DATA</SectionLabel>
+      <SectionLabel>GOOGLE SHEET</SectionLabel>
+
+      <SheetConnection
+        config={sheetConfig}
+        onSave={saveSheet}
+        sync={sync}
+        outboxCount={outboxCount}
+        onRefresh={onRefresh}
+      />
+
+      <SectionLabel style={{ marginTop: 22 }}>FILES</SectionLabel>
 
       <Action
         icon={Upload}
@@ -97,12 +115,12 @@ export default function DataScreen({
         icon={FileSpreadsheet}
         color={T.green}
         title="Export as Excel"
-        subtitle="Two sheets — customers and reminders"
+        subtitle="Three sheets — customers, actions and reminders"
         onClick={async () => {
           setError(null);
           setBusy(true);
           try {
-            await downloadWorkbook(customers, reminders);
+            await downloadWorkbook(customers, actions, reminders);
           } catch (err) {
             setError(`Couldn't build the Excel file: ${err.message}`);
           } finally {
@@ -113,9 +131,9 @@ export default function DataScreen({
       <Action
         icon={Download}
         color={T.blue}
-        title="Export customers.csv"
-        subtitle="Drop into public/data/ to change the app's starting list"
-        onClick={() => downloadCustomersCsv(customers)}
+        title="Export the three CSVs"
+        subtitle="customers, actions and reminders — the same shape as the sheet tabs"
+        onClick={() => downloadCsvs(customers, actions, reminders)}
       />
       <Action
         icon={RefreshCw}

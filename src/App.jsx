@@ -1,14 +1,16 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BarChart3, Plus, PhoneCall, Settings, Users } from "lucide-react";
 import { T, tint } from "./theme.js";
 import { initialsFor } from "./lib/analytics.js";
 import { isoDaysAgo, isoDaysFromNow, todayIso } from "./lib/dates.js";
-import { loadSeedData } from "./lib/dataSource.js";
 import * as storage from "./lib/storage.js";
 import { clearPin, loadPin, savePin } from "./lib/pin.js";
 import { clampWeeks, loadSettings, saveSettings } from "./lib/settings.js";
 import { currentWeekIndex } from "./lib/weeks.js";
-import { addVisit, hasVisit, removeVisit } from "./lib/visits.js";
+import { actionAoA, applyActions, customerAoA, loadSeedData, nextCustomerId, reminderAoA } from "./lib/dataSource.js";
+import { hasVisit } from "./lib/visits.js";
+import { changeFor, isConfigured, isSeeded, loadSheetConfig, markSeeded, readAll, replaceTab, saveSheetConfig } from "./lib/sheets.js";
+import { enqueue, flush, fromSheet, loadOutbox, saveOutbox, syncNow } from "./lib/sync.js";
 
 import StaffHome from "./screens/StaffHome.jsx";
 import PinGate from "./screens/PinGate.jsx";
@@ -42,9 +44,24 @@ const OWNER_TABS = [
 export default function App() {
   const [status, setStatus] = useState("loading"); // loading | ready | error
   const [loadError, setLoadError] = useState(null);
-  const [customers, setCustomers] = useState([]);
+  // `people` holds everything about a customer except their visits; `actions`
+  // is the log those visits are derived from. Keeping them apart means a tap
+  // appends one row rather than rewriting a customer record.
+  const [people, setPeople] = useState([]);
+  const [actions, setActions] = useState([]);
   const [reminders, setReminders] = useState([]);
   const [source, setSource] = useState(null);
+  const customers = useMemo(() => applyActions(people, actions), [people, actions]);
+  // Read inside callbacks that must not re-create on every edit.
+  const peopleRef = useRef(people);
+  peopleRef.current = people;
+
+  // Google Sheet connection, plus the queue of changes it has not been told about.
+  const [sheetConfig, setSheetConfig] = useState(loadSheetConfig);
+  const [outbox, setOutbox] = useState(loadOutbox);
+  const [sync, setSync] = useState({ state: "idle", at: null, error: null });
+  const outboxRef = useRef(outbox);
+  outboxRef.current = outbox;
 
   const [mode, setMode] = useState("staff"); // staff | pin | owner
   const [ownerTab, setOwnerTab] = useState("followups");
@@ -88,45 +105,146 @@ export default function App() {
     setOwnerPin(loadPin(import.meta.env.VITE_OWNER_PIN));
   }, []);
 
-  /* ---- load: whatever this device already has, else the shipped CSVs ---- */
+  /* ---- loading, and keeping in step with the sheet ---- */
+
+  const queue = useCallback((changes) => {
+    setOutbox((prev) => {
+      const next = enqueue(prev, changes);
+      saveOutbox(next);
+      return next;
+    });
+  }, []);
+
+  const adopt = useCallback((data) => {
+    setPeople(data.customers.map(({ visits, ...rest }) => rest));
+    setActions(data.actions);
+    setReminders(data.reminders);
+  }, []);
 
   const applySeed = useCallback(async () => {
     const data = await loadSeedData();
-    const src = { kind: "seed", label: "customers.csv", at: todayIso() };
-    setCustomers(data.customers);
-    setReminders(data.reminders);
-    setSource(src);
-    storage.save(data.customers, data.reminders);
-    storage.saveSource(src);
+    adopt(data);
+    setSource({ kind: "seed", label: "customers.csv", at: todayIso() });
+    storage.save(data.customers, data.actions, data.reminders);
     return data;
-  }, []);
+  }, [adopt]);
+
+  /**
+   * Push anything pending, then pull the sheet. Runs on open and whenever the
+   * app comes back to the foreground, so what is on screen is what the sheet
+   * says. Failing is not fatal — the device copy carries on and the outbox
+   * keeps the unsent work for the next attempt.
+   */
+  const refresh = useCallback(
+    async ({ quiet = false } = {}) => {
+      if (!isConfigured(sheetConfig)) return;
+      if (!quiet) setSync((s0) => ({ ...s0, state: "syncing", error: null }));
+      try {
+        const seeded = isSeeded(sheetConfig);
+
+        // Before the first upload the sheet is not authoritative. Read it, but
+        // do not push to it and do not let it replace what is on the device —
+        // one change trickling up would leave the sheet holding a single
+        // customer, which the next read would then adopt over the whole book.
+        if (!seeded) {
+          const data = fromSheet(await readAll(sheetConfig));
+          if (!data.customers.length) {
+            setSync({
+              state: "empty",
+              at: new Date().toISOString(),
+              error: "The sheet is empty. Upload this device's list to fill it.",
+            });
+            return;
+          }
+          // It already has data, so this device is joining an existing book.
+          adopt(data);
+          markSeeded(sheetConfig);
+          setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
+          storage.save(data.customers, data.actions, data.reminders);
+          setSync({ state: "idle", at: new Date().toISOString(), error: null });
+          return;
+        }
+
+        const data = await syncNow(sheetConfig, outboxRef.current);
+        adopt(data);
+        setOutbox(data.outbox);
+        saveOutbox(data.outbox);
+        setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
+        storage.save(data.customers, data.actions, data.reminders);
+        setSync({ state: "idle", at: new Date().toISOString(), error: null });
+      } catch (err) {
+        setSync((s0) => ({ ...s0, state: "error", error: err.message }));
+      }
+    },
+    [sheetConfig, adopt]
+  );
+
+  /**
+   * Sends queued changes shortly after they are made. A tap must not wait for
+   * the network, but it must not sit in the queue until the app happens to
+   * lose focus either — which is what it did before this existed.
+   */
+  useEffect(() => {
+    if (!outbox.length || !isConfigured(sheetConfig) || !isSeeded(sheetConfig)) return undefined;
+    const timer = setTimeout(async () => {
+      try {
+        const remaining = await flush(sheetConfig, outboxRef.current);
+        setOutbox(remaining);
+        saveOutbox(remaining);
+        setSync({ state: "idle", at: new Date().toISOString(), error: null });
+      } catch (err) {
+        // Stays queued; the next change, focus or Sync will try again.
+        setSync((s0) => ({ ...s0, state: "error", error: err.message }));
+      }
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [outbox, sheetConfig]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Show something immediately: the device copy, else the shipped CSVs.
       const saved = storage.loadSaved();
       if (saved) {
         if (cancelled) return;
-        setCustomers(saved.customers);
-        setReminders(saved.reminders);
+        adopt(saved);
         setSource(storage.loadSource());
         setStatus("ready");
-        return;
-      }
-      try {
-        await applySeed();
-        if (!cancelled) setStatus("ready");
-      } catch (err) {
-        if (!cancelled) {
-          setLoadError(err.message);
-          setStatus("error");
+      } else {
+        try {
+          await applySeed();
+          if (!cancelled) setStatus("ready");
+        } catch (err) {
+          if (!cancelled) {
+            setLoadError(err.message);
+            setStatus("error");
+          }
+          return;
         }
       }
+      if (!cancelled) refresh({ quiet: true });
     })();
     return () => {
       cancelled = true;
     };
-  }, [applySeed]);
+    // Deliberately once on mount; later refreshes are driven by focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // "Latest data every time the user views the UI" — re-read on return.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh({ quiet: true });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    window.addEventListener("online", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      window.removeEventListener("online", onVisible);
+    };
+  }, [refresh]);
 
   // The offer expires together; each new tap or undo restarts the window.
   useEffect(() => {
@@ -138,12 +256,28 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [pending, notice]);
 
-  // Every change is written straight through, so a reload never loses a visit.
+  // Every change is written straight through, so a reload never loses a visit
+  // even before the sheet has been told about it.
   useEffect(() => {
-    if (status === "ready") storage.save(customers, reminders);
-  }, [customers, reminders, status]);
+    if (status === "ready") storage.save(customers, actions, reminders);
+  }, [customers, actions, reminders, status]);
 
-  /* ---- mutations ---- */
+  /* ---- mutations: apply locally, queue for the sheet ---- */
+
+  /** Edits a customer record and sends the whole row up. */
+  const patchPerson = useCallback(
+    (id, patch) => {
+      setPeople((ps) =>
+        ps.map((person) => {
+          if (person.id !== id) return person;
+          const next = { ...person, ...patch };
+          queue([changeFor.customer(next)]);
+          return next;
+        })
+      );
+    },
+    [queue]
+  );
 
   const logVisit = (id, daysAgo) => {
     const date = isoDaysAgo(daysAgo);
@@ -152,89 +286,118 @@ export default function App() {
 
     // A second tap on the same day changes nothing, so there is nothing to
     // undo — offering undo there would delete the first, genuine visit.
-    const alreadyLogged = hasVisit(customer, date);
-    if (alreadyLogged) {
+    if (hasVisit(customer, date)) {
       setNotice({ key: uid("n"), name: customer.name });
     } else {
-      setCustomers((cs) => cs.map((c) => (c.id === id ? addVisit(c, date) : c)));
+      const action = { actionId: uid("act"), customerId: id, date, isLogged: true, loggedAt: new Date().toISOString() };
+      setActions((as) => [...as, action]);
+      queue([changeFor.action(action)]);
       setNotice(null);
-      setPending((p) => [...p, { key: uid("u"), customerId: id, name: customer.name, date }].slice(-UNDO_DEPTH));
+      setPending((p) => [...p, { key: uid("u"), actionId: action.actionId, name: customer.name }].slice(-UNDO_DEPTH));
     }
 
     setJustLogged(id);
     setTimeout(() => setJustLogged(null), 900);
   };
 
+  /**
+   * Undo and delete both flip `is_logged` rather than dropping the row, so the
+   * sheet keeps a record that the tap happened and was taken back.
+   */
+  const retractAction = useCallback(
+    (actionId) => {
+      setActions((as) =>
+        as.map((a) => {
+          if (a.actionId !== actionId || !a.isLogged) return a;
+          const next = { ...a, isLogged: false };
+          queue([changeFor.action(next)]);
+          return next;
+        })
+      );
+    },
+    [queue]
+  );
+
   /** Steps back one tap at a time, newest first, so a burst unwinds in order. */
   const undoVisit = () => {
     const last = pending[pending.length - 1];
     if (!last) return;
-    // Kept out of the state updater: React may call an updater twice, and a
-    // removal is not something to run as a side effect of one.
-    setCustomers((cs) => cs.map((c) => (c.id === last.customerId ? removeVisit(c, last.date) : c)));
+    retractAction(last.actionId);
     setPending((p) => p.slice(0, -1));
     setNotice(null);
   };
 
-  /** "I rang them, and this is what they said." Clears any snooze. */
-  const markCalled = (id, reason, note) => {
-    setCustomers((cs) =>
-      cs.map((c) =>
-        c.id === id ? { ...c, contact: { on: todayIso(), reason, note }, snoozedUntilWeek: null } : c
-      )
-    );
+  /** Owner-only: remove a visit that should never have been recorded. */
+  const deleteVisit = (customerId, date) => {
+    const match = actions.find((a) => a.customerId === customerId && a.date === date && a.isLogged);
+    if (!match) return;
+    retractAction(match.actionId);
+    setPending((p) => p.filter((e) => e.actionId !== match.actionId));
   };
+
+  /** "I rang them, and this is what they said." Clears any snooze. */
+  const markCalled = (id, reason, note) =>
+    patchPerson(id, { contact: { on: todayIso(), reason, note }, snoozedUntil: null, snoozedUntilWeek: null });
 
   /** Out of sight for a set number of trading weeks. */
   const snooze = (id, weeks) => {
     const until = currentWeekIndex() + weeks;
-    setCustomers((cs) => cs.map((c) => (c.id === id ? { ...c, snoozedUntilWeek: until } : c)));
+    patchPerson(id, { snoozedUntilWeek: until, snoozedUntil: isoDaysFromNow(weeks * 7) });
   };
 
-  const unsnooze = (id) => {
-    setCustomers((cs) => cs.map((c) => (c.id === id ? { ...c, snoozedUntilWeek: null } : c)));
-  };
+  const unsnooze = (id) => patchPerson(id, { snoozedUntilWeek: null, snoozedUntil: null });
 
   const addReminder = (customerId, dueInDays, note) => {
-    setReminders((rs) => [...rs, { id: uid("r"), customerId, dueOn: isoDaysFromNow(dueInDays), note }]);
+    const reminder = { id: uid("rem"), customerId, dueOn: isoDaysFromNow(dueInDays), note, isDone: false };
+    setReminders((rs) => [...rs, reminder]);
+    queue([changeFor.reminder(reminder, customers.find((c) => c.id === customerId)?.name)]);
   };
 
-  const dismissReminder = (id) => setReminders((rs) => rs.filter((r) => r.id !== id));
+  const dismissReminder = (id) => {
+    const reminder = reminders.find((r) => r.id === id);
+    setReminders((rs) => rs.filter((r) => r.id !== id));
+    // Marked done in the sheet rather than deleted, so the row survives.
+    if (reminder) {
+      queue([
+        changeFor.reminder({ ...reminder, isDone: true }, customers.find((c) => c.id === reminder.customerId)?.name),
+      ]);
+    }
+  };
 
   const addCustomer = ({ name, phone, visitEveryWeeks, visitedToday }) => {
-    const customer = {
-      id: uid("c"),
+    const person = {
+      id: nextCustomerId(people),
       name,
       phone,
       initials: initialsFor(name),
       visitEveryWeeks: visitEveryWeeks ?? null,
-      visits: visitedToday ? [todayIso()] : [],
       contact: null,
       snoozedUntilWeek: null,
     };
-    setCustomers((cs) => [...cs, customer]);
+    setPeople((ps) => [...ps, person]);
+    const changes = [changeFor.customer(person)];
+
+    if (visitedToday) {
+      const action = { actionId: uid("act"), customerId: person.id, date: todayIso(), isLogged: true, loggedAt: new Date().toISOString() };
+      setActions((as) => [...as, action]);
+      changes.push(changeFor.action(action));
+    }
+    queue(changes);
   };
 
-  const updateCustomer = (id, patch) => {
-    setCustomers((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
-  };
-
-  /** Owner-only: remove a visit that should never have been recorded. */
-  const deleteVisit = (customerId, date) => {
-    setCustomers((cs) => cs.map((c) => (c.id === customerId ? removeVisit(c, date) : c)));
-    // Anything still offered as undo for that visit would now be a dead button.
-    setPending((p) => p.filter((e) => !(e.customerId === customerId && e.date === date)));
-  };
+  const updateCustomer = (id, patch) => patchPerson(id, patch);
 
   const deleteCustomer = (id) => {
-    setCustomers((cs) => cs.filter((c) => c.id !== id));
+    setPeople((ps) => ps.filter((c) => c.id !== id));
     setReminders((rs) => rs.filter((r) => r.customerId !== id));
+    // The sheet keeps the row; blanking the name is what marks it gone.
+    const person = people.find((c) => c.id === id);
+    if (person) queue([changeFor.customer({ ...person, name: "" })]);
   };
 
   const replaceData = (data, src) => {
     const stamped = { ...src, at: todayIso() };
-    setCustomers(data.customers);
-    setReminders(data.reminders);
+    adopt({ customers: data.customers, actions: data.actions || [], reminders: data.reminders });
     setSource(stamped);
     storage.saveSource(stamped);
     setDetailOpen(false);
@@ -247,6 +410,26 @@ export default function App() {
     setActiveCustomerId(null);
     await applySeed();
   };
+
+  /**
+   * Sends the whole device book up, replacing whatever the sheet holds. Used
+   * once when first connecting an empty sheet; it is destructive on the sheet
+   * side, so the caller confirms first.
+   */
+  const uploadEverything = useCallback(
+    async (onProgress) => {
+      await replaceTab(sheetConfig, "customers", customerAoA(customers), onProgress);
+      await replaceTab(sheetConfig, "actions", actionAoA(actions), onProgress);
+      await replaceTab(sheetConfig, "reminders", reminderAoA(reminders, customers), onProgress);
+      // Everything is now up there, so anything queued is redundant.
+      setOutbox([]);
+      saveOutbox([]);
+      markSeeded(sheetConfig); // the sheet is now authoritative
+      setSync({ state: "idle", at: new Date().toISOString(), error: null });
+      setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
+    },
+    [sheetConfig, customers, actions, reminders]
+  );
 
   const openCustomer = (c) => {
     setActiveCustomerId(c.id);
@@ -343,6 +526,7 @@ export default function App() {
             {ownerTab === "data" && (
               <DataScreen
                 customers={customers}
+                actions={actions}
                 reminders={reminders}
                 replaceData={replaceData}
                 reloadSeed={reloadSeed}
@@ -352,6 +536,16 @@ export default function App() {
                 resetPin={resetPin}
                 settings={settings}
                 updateSettings={updateSettings}
+                sheetConfig={sheetConfig}
+                saveSheet={(next) => {
+                  saveSheetConfig(next);
+                  setSheetConfig(next);
+                }}
+                sync={sync}
+                outboxCount={outbox.length}
+                onRefresh={() => refresh()}
+                onUpload={uploadEverything}
+                counts={{ customers: customers.length, actions: actions.length, reminders: reminders.length }}
               />
             )}
           </>

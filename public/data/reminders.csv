@@ -1,10 +1,10 @@
-customer_name,due_date,note
-Laxmi Gold House,2026-10-02,Asked about an exchange on old gold
-Shree Ambika Jewels,2026-10-05,Referral follow-up she mentioned
-Shree Alankar,2026-09-24,Wedding season enquiry
-Thakkar Bullion,2026-10-11,Ask about their Diwali order
-Sethi Brothers,2026-10-12,Asked about an exchange on old gold
-Shree Jewellers,2026-10-03,Referral follow-up she mentioned
-Om Ornaments,2026-10-06,Check if the repair was collected
-Iyer Brothers,2026-10-03,Wedding season enquiry
-Gold Gold House,2026-10-04,Follow up on the silver order
+reminder_id,customer_id,customer_name,due_date,note
+r1,5,Laxmi Gold House,2026-10-22,Asked about an exchange on old gold
+r2,2,Shree Ambika Jewels,2026-10-25,Referral follow-up she mentioned
+r3,38,Shree Alankar,2026-10-14,Wedding season enquiry
+r4,17,Thakkar Bullion,2026-10-31,Ask about their Diwali order
+r5,11,Sethi Brothers,2026-11-01,Asked about an exchange on old gold
+r6,52,Shree Jewellers,2026-10-23,Referral follow-up she mentioned
+r7,26,Om Ornaments,2026-10-26,Check if the repair was collected
+r8,7,Iyer Brothers,2026-10-23,Wedding season enquiry
+r9,21,Gold Gold House,2026-10-24,Follow up on the silver order

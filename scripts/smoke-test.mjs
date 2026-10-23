@@ -8,6 +8,10 @@ import { avgGap, initialsFor, regularity, statusFor, targetFor, visitDays, weeks
 import { buildFollowUps, cameBackAfterCall, isEstablished } from "../src/lib/followups.js";
 import { addVisit, hasVisit, removeVisit } from "../src/lib/visits.js";
 import { buildVisitLog } from "../src/lib/visitLog.js";
+import { applyActions, actionsFromCustomers, nextCustomerId, normalizeActions, normalizeCustomers, normalizeReminders } from "../src/lib/dataSource.js";
+import { enqueue } from "../src/lib/sync.js";
+import { changeFor, isConfigured } from "../src/lib/sheets.js";
+import { actionAoA, customerAoA } from "../src/lib/dataSource.js";
 import { clampRange, countVisitsBetween, countVisitsSince, earliestVisit, historyDays, periodStart, resolveRange, visitCounts } from "../src/lib/visitCounts.js";
 import { customerVisitCounts, periodByKey, reasonBreakdown } from "../src/lib/reports.js";
 import { currentWeekIndex } from "../src/lib/weeks.js";
@@ -664,6 +668,144 @@ check("the picker cannot produce a date outside the bounds", () => {
   assert.equal(buildBoundedDate(2026, 2, 1, min, max), min, "same month as the floor, earlier day");
   assert.equal(buildBoundedDate(2026, 9, 31, min, max), max, "same month as the ceiling, later day");
   assert.equal(buildBoundedDate(2026, 5, 10, min, max), "2026-06-10", "inside the window, untouched");
+});
+
+/* ---- customer ids and the action log ---- */
+
+check("ids in the sheet are kept; missing or duplicated ones are reissued", () => {
+  const cs = normalizeCustomers([
+    { customer_id: 3, name: "Gamma" },
+    { name: "Alpha" },
+    { customer_id: 3, name: "Delta" }, // a clash, not a merge: different name
+  ]);
+  assert.deepEqual(cs.map((c) => `${c.id}:${c.name}`), ["3:Gamma", "1:Alpha", "2:Delta"]);
+  assert.equal(nextCustomerId(cs), "4");
+});
+
+check("an id survives a rename, which a name-based key could not", () => {
+  const cs = normalizeCustomers([{ customer_id: 7, name: "Old Name" }]);
+  const reminders = normalizeReminders([{ customer_id: 7, due_date: "2026-10-01", note: "x" }], [
+    { ...cs[0], name: "Brand New Name" },
+  ]);
+  assert.equal(reminders.length, 1, "the reminder still finds its customer");
+});
+
+check("visits come from logged actions only", () => {
+  const cs = normalizeCustomers([{ customer_id: 1, name: "A" }]);
+  const actions = normalizeActions(
+    [
+      { customer_id: 1, visit_date: "2026-10-01", is_logged: 1 },
+      { customer_id: 1, visit_date: "2026-10-02", is_logged: 0 }, // undone
+      { customer_id: 1, visit_date: "2026-10-03" }, // blank counts as logged
+    ],
+    cs
+  );
+  assert.deepEqual(applyActions(cs, actions)[0].visits, ["2026-10-03", "2026-10-01"]);
+});
+
+check("an undone action stays in the log rather than vanishing", () => {
+  const cs = normalizeCustomers([{ customer_id: 1, name: "A" }]);
+  const actions = normalizeActions([{ action_id: "a1", customer_id: 1, visit_date: "2026-10-01", is_logged: 0 }], cs);
+  assert.equal(actions.length, 1, "the row is still there");
+  assert.equal(actions[0].isLogged, false);
+  assert.deepEqual(applyActions(cs, actions)[0].visits, [], "but it is not a visit");
+});
+
+check("an older sheet with packed visit_dates converts to action rows", () => {
+  const cs = normalizeCustomers([{ customer_id: 1, name: "A", visit_dates: "2026-10-01 | 2026-09-01" }]);
+  const actions = actionsFromCustomers(cs);
+  assert.equal(actions.length, 2);
+  assert.ok(actions.every((a) => a.customerId === "1" && a.isLogged));
+});
+
+/* ---- the outbox ---- */
+
+check("only a deployed web app URL counts as configured", () => {
+  assert.equal(isConfigured({ url: "https://script.google.com/macros/s/AKfy123/exec" }), true);
+  for (const bad of ["", "not a url", "https://docs.google.com/spreadsheets/d/abc", undefined]) {
+    assert.equal(isConfigured({ url: bad }), false, JSON.stringify(bad));
+  }
+});
+
+check("re-tapping a row replaces its queued change instead of stacking them", () => {
+  const a1 = changeFor.action({ actionId: "a1", customerId: "1", date: "2026-10-01", isLogged: true });
+  const a1Undone = changeFor.action({ actionId: "a1", customerId: "1", date: "2026-10-01", isLogged: false });
+  const a2 = changeFor.action({ actionId: "a2", customerId: "2", date: "2026-10-01", isLogged: true });
+
+  let q = enqueue([], [a1]);
+  q = enqueue(q, [a2]);
+  q = enqueue(q, [a1Undone]);
+  assert.equal(q.length, 2, "log-then-undo is one row, not two");
+  assert.equal(q.find((c) => c.row.action_id === "a1").row.is_logged, 0, "and it is the final state that goes up");
+});
+
+check("changes to different tables queue side by side", () => {
+  const q = enqueue(
+    [],
+    [
+      changeFor.customer({ id: "1", name: "A" }),
+      changeFor.action({ actionId: "a1", customerId: "1", date: "2026-10-01", isLogged: true }),
+      changeFor.reminder({ id: "r1", customerId: "1", dueOn: "2026-10-05", note: "" }, "A"),
+    ]
+  );
+  assert.deepEqual(q.map((c) => c.tab), ["customers", "actions", "reminders"]);
+  assert.equal(q[0].key, "customer_id");
+});
+
+check("a URL that is not a deployed web app is rejected before any request", () => {
+  const cases = {
+    "https://script.google.com/macros/s/AKfy123/exec": true,
+    "https://script.google.com/macros/s/AKfy123/dev": false,      // test URL, needs a login
+    "https://docs.google.com/spreadsheets/d/abc/edit": false,     // the sheet, not the script
+    "https://script.google.com/macros/s/AKfy123": false,          // missing /exec
+    "": false,
+  };
+  for (const [url, expected] of Object.entries(cases)) {
+    assert.equal(isConfigured({ url }), expected, url || "(empty)");
+  }
+});
+
+check("a full upload is chunked small enough for a URL to carry", () => {
+  // The transport that works here is GET, so every chunk has to fit in a URL.
+  const many = Array.from({ length: 500 }, (_, i) => ({
+    actionId: `a${i}`,
+    customerId: String((i % 60) + 1),
+    date: "2026-10-01",
+    isLogged: true,
+    loggedAt: "2026-10-01T09:00:00.000Z",
+  }));
+  const [, ...rows] = actionAoA(many);
+
+  // Mirrors the packing in replaceTab.
+  const chunks = [];
+  let current = [];
+  let size = 0;
+  for (const row of rows) {
+    const rowSize = JSON.stringify(row).length;
+    if (current.length && size + rowSize > 3500) {
+      chunks.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(row);
+    size += rowSize;
+  }
+  if (current.length) chunks.push(current);
+
+  assert.ok(chunks.length > 1, "500 actions must not go up in one request");
+  for (const chunk of chunks) {
+    const url = `https://script.google.com/macros/s/x/exec?payload=${encodeURIComponent(
+      JSON.stringify({ op: "replace", tab: "actions", rows: chunk, mode: "append" })
+    )}`;
+    assert.ok(url.length <= 7000, `a chunk produced a ${url.length}-character URL`);
+  }
+  assert.equal(chunks.flat().length, rows.length, "no rows lost in the chunking");
+});
+
+check("the header row is not uploaded — the script writes its own", () => {
+  const aoa = customerAoA([{ id: "1", name: "A", visits: [] }]);
+  assert.equal(aoa[0][0], "customer_id", "row 0 is the header");
+  assert.equal(aoa.length, 2, "header plus one customer");
 });
 
 /* ---- names ---- */

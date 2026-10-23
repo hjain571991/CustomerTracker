@@ -8,19 +8,28 @@ import { initialsFor } from "./analytics.js";
 /**
  * Everything that turns a spreadsheet into app data, and back again.
  *
- * Two sheets/files are understood:
- *   customers — name, phone, initials, visit_dates, last_call_date, promised_date
- *   reminders — customer_name, due_date, note
+ * Three tables, whether they arrive as CSV files or Google Sheet tabs:
+ *   customers — customer_id, name, phone, visit_every_weeks, …
+ *   actions   — customer_id, visit_date, is_logged   (one row per tap)
+ *   reminders — customer_id, due_date, note
  *
- * Header matching is deliberately forgiving: case, spaces, underscores and
- * common synonyms all resolve to the same field, because the file is going to
- * be maintained by hand in Excel.
+ * `customer_id` is the join key everywhere. It is a stable incremental number
+ * written into the sheet, not derived from the name — renaming a shop used to
+ * break the link to its reminders and visits.
+ *
+ * A visit is an *action row*, not a cell. Undoing or deleting one flips
+ * `is_logged` to 0 rather than removing the row, so the sheet keeps the audit
+ * trail of what was tapped and what was taken back.
+ *
+ * Header matching stays forgiving — case, spaces, underscores and common
+ * synonyms all resolve — because these are maintained by hand.
  */
 
 const CUSTOMER_FIELDS = {
+  customerId: ["customerid", "custid", "id", "code"],
   name: ["name", "customername", "customer", "shop", "shopname", "party", "partyname"],
   phone: ["phone", "phonenumber", "mobile", "mobileno", "contact", "contactnumber", "number"],
-  initials: ["initials", "shortcode", "code"],
+  initials: ["initials", "shortcode"],
   visitEveryWeeks: [
     "visiteveryweeks", "everyweeks", "weeks", "frequencyweeks", "cycleweeks",
     "visitcycle", "frequency", "interval", "target", "cadence", "visitevery",
@@ -37,7 +46,18 @@ const CUSTOMER_FIELDS = {
   snoozedUntil: ["snoozeduntil", "snoozeuntil", "snoozed", "remindafter"],
 };
 
+const ACTION_FIELDS = {
+  actionId: ["actionid", "id"],
+  customerId: ["customerid", "custid", "customer"],
+  customerName: ["customername", "name", "shop"],
+  date: ["visitdate", "date", "actiondate", "loggedfor", "visitedon"],
+  isLogged: ["islogged", "logged", "active", "valid"],
+  loggedAt: ["loggedat", "recordedat", "createdat", "timestamp"],
+};
+
 const REMINDER_FIELDS = {
+  reminderId: ["reminderid", "id"],
+  customerId: ["customerid", "custid"],
   name: ["customername", "customer", "name", "shop", "shopname"],
   dueOn: ["duedate", "dueon", "calldate", "remindon", "reminderdate", "due"],
   note: ["note", "notes", "reason", "about", "comment"],
@@ -97,8 +117,26 @@ const sortDatesDesc = (dates) => [...new Set(dates)].sort((a, b) => (a < b ? 1 :
 
 export class DataError extends Error {}
 
+const asId = (v) => {
+  const n = Math.trunc(Number(text(v)));
+  return Number.isFinite(n) && n > 0 ? String(n) : null;
+};
+
+/** The next free id, so hand-added sheet rows never collide with app-added ones. */
+export function nextCustomerId(customers) {
+  let max = 0;
+  for (const c of customers) {
+    const n = Number(c.id);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return String(max + 1);
+}
+
 export function normalizeCustomers(rows) {
+  const out = [];
   const byName = new Map();
+  const taken = new Set();
+  const needsId = [];
 
   rows.forEach((row) => {
     const f = pick(row, CUSTOMER_FIELDS);
@@ -123,8 +161,14 @@ export function normalizeCustomers(rows) {
       return;
     }
 
-    byName.set(name.toLowerCase(), {
-      id: makeId(name),
+    // An id already in the sheet is kept; a duplicate or missing one is reissued
+    // afterwards, once we know which numbers are spoken for.
+    let id = asId(f.customerId);
+    if (id && taken.has(id)) id = null;
+    if (id) taken.add(id);
+
+    const customer = {
+      id,
       name,
       phone: f.phone == null ? "" : String(f.phone).trim(),
       initials: f.initials ? String(f.initials).trim().slice(0, 2).toUpperCase() : initialsFor(name),
@@ -132,36 +176,96 @@ export function normalizeCustomers(rows) {
       visits: sortDatesDesc(visits),
       contact,
       snoozedUntilWeek,
-    });
+    };
+    if (!id) needsId.push(customer);
+    byName.set(name.toLowerCase(), customer);
+    out.push(customer);
   });
 
-  return [...byName.values()];
+  let next = 1;
+  for (const customer of needsId) {
+    while (taken.has(String(next))) next += 1;
+    customer.id = String(next);
+    taken.add(customer.id);
+  }
+
+  return out;
+}
+
+/**
+ * One row per tap. `is_logged` 0 means it was undone or deleted — the row stays
+ * so the sheet records that it happened and was taken back.
+ */
+export function normalizeActions(rows, customers) {
+  const byId = new Map(customers.map((c) => [c.id, c]));
+  const byName = new Map(customers.map((c) => [c.name.toLowerCase(), c]));
+  let seq = 0;
+
+  return rows
+    .map((row) => {
+      const f = pick(row, ACTION_FIELDS);
+      const customer = byId.get(asId(f.customerId)) || byName.get(text(f.customerName).toLowerCase());
+      const date = parseDate(f.date);
+      if (!customer || !date) return null; // an action for nobody, or with no date
+      seq += 1;
+      return {
+        actionId: text(f.actionId) || `a${seq}`,
+        customerId: customer.id,
+        date,
+        // Anything but an explicit 0/false/no counts as logged, so a blank
+        // column in a hand-made sheet behaves as "yes, they came".
+        isLogged: !/^(0|false|no|n)$/i.test(text(f.isLogged)),
+        loggedAt: text(f.loggedAt) || null,
+      };
+    })
+    .filter(Boolean);
+}
+
+/** Rebuilds every customer's visit list from the action log. */
+export function applyActions(customers, actions) {
+  const dates = new Map();
+  for (const a of actions) {
+    if (!a.isLogged) continue;
+    if (!dates.has(a.customerId)) dates.set(a.customerId, []);
+    dates.get(a.customerId).push(a.date);
+  }
+  return customers.map((c) => ({ ...c, visits: sortDatesDesc(dates.get(c.id) || []) }));
+}
+
+/** Turns packed `visit_dates` cells into action rows, for the first migration. */
+export function actionsFromCustomers(customers) {
+  const actions = [];
+  let seq = 0;
+  for (const c of customers) {
+    for (const date of c.visits || []) {
+      seq += 1;
+      actions.push({ actionId: `a${seq}`, customerId: c.id, date, isLogged: true, loggedAt: null });
+    }
+  }
+  return actions;
 }
 
 export function normalizeReminders(rows, customers) {
+  const byId = new Map(customers.map((c) => [c.id, c]));
   const byName = new Map(customers.map((c) => [c.name.toLowerCase(), c]));
+  let seq = 0;
 
   return rows
     .map((row) => {
       const f = pick(row, REMINDER_FIELDS);
-      const name = f.name == null ? "" : String(f.name).trim();
-      const customer = byName.get(name.toLowerCase());
+      // Prefer the id; fall back to the name so older sheets still load.
+      const customer = byId.get(asId(f.customerId)) || byName.get(text(f.name).toLowerCase());
       const dueOn = parseDate(f.dueOn);
       if (!customer || !dueOn) return null; // a reminder for nobody, or with no date, is noise
+      seq += 1;
       return {
-        id: makeId(`${name}-${dueOn}`),
+        id: text(f.reminderId) || `r${seq}`,
         customerId: customer.id,
         dueOn,
         note: f.note == null ? "" : String(f.note).trim(),
       };
     })
     .filter(Boolean);
-}
-
-let idCounter = 0;
-function makeId(seed) {
-  idCounter += 1;
-  return `${String(seed).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}-${idCounter}`;
 }
 
 function sheetRows(workbook, aliases) {
@@ -184,20 +288,23 @@ function sheetNameFor(names, wanted) {
   return names.find((n) => want.includes(normalizeHeader(n))) || names[0];
 }
 
-/** Row objects -> `{ customers, reminders }`, with the reminders joined by name. */
-function buildData(customerRows, reminderRows) {
+/** Row objects -> `{ customers, actions, reminders }`, joined on customer_id. */
+function buildData(customerRows, actionRows, reminderRows) {
   const customers = normalizeCustomers(customerRows);
   if (!customers.length) {
     throw new DataError(
-      "No customers found. The sheet needs at least a 'name' column, plus 'visit_dates' for the rhythm to work."
+      "No customers found. The sheet needs at least a 'name' column, plus an actions tab or visit_dates for the rhythm to work."
     );
   }
-  return { customers, reminders: reminderRows ? normalizeReminders(reminderRows, customers) : [] };
+  // An actions table wins; without one, any packed visit_dates cells become actions.
+  const actions = actionRows ? normalizeActions(actionRows, customers) : actionsFromCustomers(customers);
+  const reminders = reminderRows ? normalizeReminders(reminderRows, customers) : [];
+  return { customers: applyActions(customers, actions), actions, reminders };
 }
 
 /** Parses a customers CSV. Synchronous — no spreadsheet library involved. */
 export function parseCustomersCsv(text) {
-  return buildData(parseCsv(text), null);
+  return buildData(parseCsv(text), null, null);
 }
 
 /** Parses a real workbook, loading SheetJS on demand. */
@@ -217,9 +324,14 @@ export async function parseWorkbook(data, filename = "") {
 
   const rowsOf = (name) => XLSX.utils.sheet_to_json(workbook.Sheets[name], { defval: "" });
   const customerSheet = sheetNameFor(workbook.SheetNames, ["customers", "customer", "sheet1"]);
+  const actionSheet = workbook.SheetNames.find((n) => normalizeHeader(n).startsWith("action"));
   const reminderSheet = workbook.SheetNames.find((n) => normalizeHeader(n).startsWith("reminder"));
 
-  return buildData(rowsOf(customerSheet), reminderSheet ? rowsOf(reminderSheet) : null);
+  return buildData(
+    rowsOf(customerSheet),
+    actionSheet ? rowsOf(actionSheet) : null,
+    reminderSheet ? rowsOf(reminderSheet) : null
+  );
 }
 
 /**
@@ -245,23 +357,29 @@ export async function loadSeedData(baseUrl = import.meta.env.BASE_URL) {
   };
 
   const { customers } = parseCustomersCsv(await fetchText("data/customers.csv", true));
+
+  // An actions file wins over any packed visit_dates cells; without one the
+  // packed cells are converted, so an older sheet still opens.
+  const actionsCsv = await fetchText("data/actions.csv", false);
+  const actions = actionsCsv ? normalizeActions(parseCsv(actionsCsv), customers) : actionsFromCustomers(customers);
+
   const remindersCsv = await fetchText("data/reminders.csv", false);
   const reminders = remindersCsv ? normalizeReminders(parseCsv(remindersCsv), customers) : [];
 
-  return { customers, reminders };
+  return { customers: applyActions(customers, actions), actions, reminders };
 }
 
 /* ---------------- Export ---------------- */
 
-function customerAoA(customers) {
+export function customerAoA(customers) {
   return [
-    ["name", "phone", "initials", "visit_every_weeks", "visit_dates", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
+    ["customer_id", "name", "phone", "initials", "visit_every_weeks", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
     ...customers.map((c) => [
+      c.id,
       c.name,
       c.phone || "",
       c.initials || "",
       c.visitEveryWeeks || "",
-      (c.visits || []).join(" | "),
       c.contact?.on || "",
       c.contact?.reason || "",
       c.contact?.note || "",
@@ -270,26 +388,38 @@ function customerAoA(customers) {
   ];
 }
 
-function reminderAoA(reminders, customers) {
-  const nameOf = (id) => customers.find((c) => c.id === id)?.name || "";
+export function actionAoA(actions) {
   return [
-    ["customer_name", "due_date", "note"],
-    ...reminders.map((r) => [nameOf(r.customerId), r.dueOn, r.note || ""]),
+    ["action_id", "customer_id", "visit_date", "is_logged", "logged_at"],
+    ...actions.map((a) => [a.actionId, a.customerId, a.date, a.isLogged ? 1 : 0, a.loggedAt || ""]),
   ];
 }
 
-/** Downloads the current data as a two-sheet .xlsx — the backup / hand-off file. */
-export async function downloadWorkbook(customers, reminders, filename) {
+export function reminderAoA(reminders, customers) {
+  // The name rides along for a human reading the sheet; the id is the join.
+  const nameOf = (id) => customers.find((c) => c.id === id)?.name || "";
+  return [
+    ["reminder_id", "customer_id", "customer_name", "due_date", "note"],
+    ...reminders.map((r) => [r.id, r.customerId, nameOf(r.customerId), r.dueOn, r.note || ""]),
+  ];
+}
+
+/** Downloads the current data as a three-sheet .xlsx — the backup / hand-off file. */
+export async function downloadWorkbook(customers, actions, reminders, filename) {
   const XLSX = await loadXlsx();
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(customerAoA(customers)), "customers");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(actionAoA(actions)), "actions");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(reminderAoA(reminders, customers)), "reminders");
-  XLSX.writeFile(wb, filename || `customers-${todayIso()}.xlsx`);
+  XLSX.writeFile(wb, filename || `visit-tracker-${todayIso()}.xlsx`);
 }
 
-/** Downloads just the customers sheet as CSV, ready to drop into public/data/. */
-export function downloadCustomersCsv(customers, filename) {
-  triggerDownload(toCsv(customerAoA(customers)), filename || `customers-${todayIso()}.csv`, "text/csv;charset=utf-8");
+/** Downloads the three tables as separate CSVs, matching the sheet tabs. */
+export function downloadCsvs(customers, actions, reminders) {
+  const stamp = todayIso();
+  triggerDownload(toCsv(customerAoA(customers)), `customers-${stamp}.csv`, "text/csv;charset=utf-8");
+  triggerDownload(toCsv(actionAoA(actions)), `actions-${stamp}.csv`, "text/csv;charset=utf-8");
+  triggerDownload(toCsv(reminderAoA(reminders, customers)), `reminders-${stamp}.csv`, "text/csv;charset=utf-8");
 }
 
 function triggerDownload(text, filename, mime) {

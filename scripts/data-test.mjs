@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
-import { parseWorkbook, parseCustomersCsv, normalizeCustomers, normalizeReminders } from "../src/lib/dataSource.js";
+import { parseWorkbook, parseCustomersCsv, normalizeCustomers, normalizeActions, normalizeReminders, applyActions, nextCustomerId } from "../src/lib/dataSource.js";
 import { parseCsv } from "../src/lib/csv.js";
 import { statusFor, avgGap, targetFor } from "../src/lib/analytics.js";
 import { buildFollowUps } from "../src/lib/followups.js";
@@ -20,7 +20,21 @@ const read = (f) => readFileSync(resolve(dataDir, f), "utf8");
 /* ---- the CSVs the app actually ships ---- */
 
 const S = { ...DEFAULT_SETTINGS };
-const { customers } = parseCustomersCsv(read("customers.csv"));
+const { customers: rawCustomers } = parseCustomersCsv(read("customers.csv"));
+const seedActions = normalizeActions(parseCsv(read("actions.csv")), rawCustomers);
+const customers = applyActions(rawCustomers, seedActions);
+
+assert.ok(seedActions.length > 300, `expected a real action log, got ${seedActions.length}`);
+assert.ok(
+  customers.every((c) => /^[0-9]+$/.test(c.id)),
+  "every customer carries a numeric id from the sheet"
+);
+assert.equal(new Set(customers.map((c) => c.id)).size, customers.length, "ids are unique");
+assert.ok(
+  seedActions.every((a) => customers.some((c) => c.id === a.customerId)),
+  "every action joins a customer by id"
+);
+console.log(`  actions: ${seedActions.length} rows, all joined by customer_id`);
 assert.ok(customers.length >= 50, `expected a realistic book, got ${customers.length}`);
 console.log(`Shipped customers.csv -> ${customers.length} customers`);
 const tally = {};
@@ -38,7 +52,7 @@ for (const name of ["Rajesh Traders", "Patel & Sons", "Ganesh Ornaments"]) {
   const c = customers.find((x) => x.name === name);
   const t = targetFor(c, S);
   console.log(
-    `  ${c.initials}  ${c.name.padEnd(21)} every ${String(t.days).padStart(2)}d${t.isDefault ? "*" : " "}  ` +
+    `  ${c.initials}  ${c.name.padEnd(21)} every ${String(t.weeks).padStart(2)}w${t.isDefault ? "*" : " "}  ` +
       `avg ${String(avgGap(c) ?? "-").padStart(3)}d  ${statusFor(c, S).label}`
   );
 }
@@ -53,6 +67,10 @@ const rajesh = customers.find((c) => c.name === "Rajesh Traders");
 assert.deepEqual([...rajesh.visits].sort((a, b) => (a < b ? 1 : -1)), rajesh.visits, "visits sort most-recent first");
 
 const reminders = normalizeReminders(parseCsv(read("reminders.csv")), customers);
+assert.ok(
+  reminders.every((r) => customers.some((c) => c.id === r.customerId)),
+  "reminders join on customer_id, not name"
+);
 assert.ok(reminders.length >= 2);
 assert.ok(reminders.every((r) => customers.some((c) => c.id === r.customerId)), "every reminder joins a customer");
 console.log(`Shipped reminders.csv -> ${reminders.length} reminders, all joined to a customer`);
@@ -100,17 +118,36 @@ const wb = XLSX.utils.book_new();
 XLSX.utils.book_append_sheet(
   wb,
   XLSX.utils.aoa_to_sheet([
-    ["name", "phone", "initials", "visit_every_weeks", "visit_dates", "last_call_date", "promised_date"],
-    ...customers.map((c) => [c.name, c.phone, c.initials, c.visitEveryWeeks || "", c.visits.join(" | "), c.call?.calledOn || "", c.call?.promisedOn || ""]),
+    ["customer_id", "name", "phone", "initials", "visit_every_weeks", "last_call_date", "last_call_reason", "last_call_note"],
+    ...customers.map((c) => [
+      c.id,
+      c.name,
+      c.phone,
+      c.initials,
+      c.visitEveryWeeks || "",
+      c.contact?.on || "",
+      c.contact?.reason || "",
+      c.contact?.note || "",
+    ]),
   ]),
   "customers"
+);
+XLSX.utils.book_append_sheet(
+  wb,
+  XLSX.utils.aoa_to_sheet([
+    ["action_id", "customer_id", "visit_date", "is_logged"],
+    ...seedActions.map((a) => [a.actionId, a.customerId, a.date, a.isLogged ? 1 : 0]),
+  ]),
+  "actions"
 );
 const round = await parseWorkbook(new Uint8Array(XLSX.write(wb, { type: "array", bookType: "xlsx" })), "roundtrip.xlsx");
 assert.equal(round.customers.length, customers.length);
 for (const c of customers) {
-  const back = round.customers.find((x) => x.name === c.name);
+  const back = round.customers.find((x) => x.id === c.id);
+  assert.ok(back, `customer ${c.id} (${c.name}) did not survive the round trip`);
+  assert.equal(back.name, c.name, `name changed for ${c.id}`);
   assert.deepEqual(back.visits, c.visits, `visits changed for ${c.name}`);
-  assert.deepEqual(back.call, c.call, `call changed for ${c.name}`);
+  assert.deepEqual(back.contact, c.contact, `call changed for ${c.name}`);
   assert.equal(back.visitEveryWeeks, c.visitEveryWeeks, `cadence changed for ${c.name}`);
 }
 console.log("xlsx export -> import round trip is lossless");
