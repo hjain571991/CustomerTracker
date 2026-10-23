@@ -59,7 +59,7 @@ export default function App() {
   // Google Sheet connection, plus the queue of changes it has not been told about.
   const [sheetConfig, setSheetConfig] = useState(loadSheetConfig);
   const [outbox, setOutbox] = useState(loadOutbox);
-  const [sync, setSync] = useState({ state: "idle", at: null, error: null });
+  const [sync, setSync] = useState({ state: "idle", at: null, error: null, seeded: false });
   const outboxRef = useRef(outbox);
   outboxRef.current = outbox;
 
@@ -161,7 +161,7 @@ export default function App() {
           markSeeded(sheetConfig);
           setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
           storage.save(data.customers, data.actions, data.reminders);
-          setSync({ state: "idle", at: new Date().toISOString(), error: null });
+          setSync({ state: "idle", at: new Date().toISOString(), error: null, seeded: true });
           return;
         }
 
@@ -171,7 +171,7 @@ export default function App() {
         saveOutbox(data.outbox);
         setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
         storage.save(data.customers, data.actions, data.reminders);
-        setSync({ state: "idle", at: new Date().toISOString(), error: null });
+        setSync({ state: "idle", at: new Date().toISOString(), error: null, seeded: true });
       } catch (err) {
         setSync((s0) => ({ ...s0, state: "error", error: err.message }));
       }
@@ -222,7 +222,6 @@ export default function App() {
           return;
         }
       }
-      if (!cancelled) refresh({ quiet: true });
     })();
     return () => {
       cancelled = true;
@@ -230,6 +229,17 @@ export default function App() {
     // Deliberately once on mount; later refreshes are driven by focus.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Sync whenever the connected sheet changes — including the moment one is
+   * first saved. Without this, connecting a sheet did nothing until the app
+   * happened to lose focus: no read, so it never became the source of truth,
+   * so the outbox stayed gated and writes never left the device.
+   */
+  useEffect(() => {
+    if (!isConfigured(sheetConfig)) return;
+    refresh({ quiet: true });
+  }, [sheetConfig.url, sheetConfig.secret, refresh]);
 
   // "Latest data every time the user views the UI" — re-read on return.
   useEffect(() => {
@@ -425,7 +435,7 @@ export default function App() {
       setOutbox([]);
       saveOutbox([]);
       markSeeded(sheetConfig); // the sheet is now authoritative
-      setSync({ state: "idle", at: new Date().toISOString(), error: null });
+      setSync({ state: "idle", at: new Date().toISOString(), error: null, seeded: true });
       setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
     },
     [sheetConfig, customers, actions, reminders]

@@ -184,6 +184,11 @@ export default function SheetConnection({ config, onSave, sync, outboxCount, onR
 
       {connected && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.border}`, fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: T.textDim, lineHeight: 1.6 }}>
+          <span style={{ display: "block", marginBottom: 4 }}>
+            {sync.seeded
+              ? "This sheet is the source of truth — changes go both ways."
+              : "Not syncing yet: upload first, or the sheet needs data in it."}
+          </span>
           {outboxCount > 0 ? (
             <span style={{ color: T.amber }}>
               {outboxCount} {outboxCount === 1 ? "change" : "changes"} waiting to go up — they will send on the next sync.
@@ -195,6 +200,11 @@ export default function SheetConnection({ config, onSave, sync, outboxCount, onR
             <span style={{ display: "block", color: T.red, marginTop: 4 }}>Last sync failed: {sync.error}</span>
           )}
           {sync.state === "syncing" && <span style={{ display: "block", marginTop: 4 }}>Syncing…</span>}
+          {sync.at && sync.state === "idle" && (
+            <span style={{ display: "block", marginTop: 4 }}>
+              Last synced {new Date(sync.at).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
         </div>
       )}
     </div>
