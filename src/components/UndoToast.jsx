@@ -43,7 +43,7 @@ export default function UndoToast({ pending = [], notice, onUndo, bottomOffset =
         position: "absolute",
         left: 12,
         right: 12,
-        bottom: `calc(${bottomOffset}px + env(safe-area-inset-bottom))`,
+        bottom: `calc(${bottomOffset}px + var(--safe-bottom))`,
         zIndex: 40,
         display: "flex",
         alignItems: "center",

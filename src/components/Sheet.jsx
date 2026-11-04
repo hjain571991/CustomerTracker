@@ -19,6 +19,7 @@ export default function Sheet({ title, onClose, children }) {
         background: "rgba(0,0,0,0.6)",
         display: "flex",
         alignItems: "flex-end",
+        justifyContent: "center",
         zIndex: 30,
       }}
     >
@@ -27,8 +28,12 @@ export default function Sheet({ title, onClose, children }) {
         style={{
           background: T.surface,
           width: "100%",
+          // Centred and capped: a sheet stretched across a desktop window puts
+          // its buttons a long way from where the thumb expects them.
+          maxWidth: 560,
+          margin: "0 auto",
           borderRadius: "24px 24px 0 0",
-          padding: "18px 18px calc(26px + env(safe-area-inset-bottom))",
+          padding: "18px 18px calc(26px + var(--safe-bottom))",
           border: `1px solid ${T.border}`,
           borderBottom: "none",
           maxHeight: "82%",

@@ -13,7 +13,9 @@
  *    yet and would hand back stale rows. Sync is therefore always flush, then
  *    read.
  */
-import { applyActions, normalizeActions, normalizeCustomers, normalizeReminders } from "./dataSource.js";
+import { applyActions, normalizeActions, normalizeCustomers, normalizeReminders, normalizeReps, normalizeTiers } from "./dataSource.js";
+import { applyReps, reconcileReps } from "./reps.js";
+import { applyTiers, reconcileTiers } from "./tiers.js";
 import { readAll, writeChanges } from "./sheets.js";
 
 const OUTBOX_KEY = "cvt.outbox.v1";
@@ -63,7 +65,23 @@ export function fromSheet(raw) {
   const customers = normalizeCustomers(raw.customers || []);
   const actions = normalizeActions(raw.actions || [], customers);
   const reminders = normalizeReminders(raw.reminders || [], customers);
-  return { customers: applyActions(customers, actions), actions, reminders, readAt: raw.readAt || null };
+  // A sheet from before the reps tab existed reads as an empty list; any rep
+  // typed straight onto a customer row is adopted into it.
+  const reps = reconcileReps(normalizeReps(raw.reps || []), customers);
+  const tiers = reconcileTiers(normalizeTiers(raw.tiers || []), customers);
+  return {
+    customers: applyTiers(applyReps(applyActions(customers, actions), reps), tiers),
+    actions,
+    reminders,
+    reps,
+    tiers,
+    // A missing tab means the deployment predates it. Worth knowing: such a
+    // script also drops the columns added alongside, so changes appear to save
+    // and quietly do not.
+    hasRepsTab: Array.isArray(raw.reps),
+    hasTiersTab: Array.isArray(raw.tiers),
+    readAt: raw.readAt || null,
+  };
 }
 
 /**

@@ -1,12 +1,15 @@
 import React, { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Search } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { T, tint } from "../theme.js";
 import { COUNT_PERIODS, customerVisitCounts, earliestVisit, periodByKey, reasonBreakdown } from "../lib/reports.js";
-import { clampRange, resolveRange, todayOf } from "../lib/visitCounts.js";
+import { resolveRange, todayOf } from "../lib/visitCounts.js";
 import { formatDate } from "../lib/dates.js";
 import Avatar from "../components/Avatar.jsx";
-import DateSelect from "../components/DateSelect.jsx";
+import DateRange from "../components/DateRange.jsx";
+import SearchField from "../components/SearchField.jsx";
+import Segmented from "../components/Segmented.jsx";
 import VisitLog from "./VisitLog.jsx";
+import { cardGrid, screenPadding, useLayout } from "../lib/layout.js";
 
 const VIEWS = [
   { key: "counts", label: "Visits" },
@@ -20,6 +23,7 @@ const VIEWS = [
  * who stopped actually say".
  */
 export default function Reports({ customers, deleteVisit, openCustomer }) {
+  const layout = useLayout();
   const [view, setView] = useState("counts");
   const [periodKey, setPeriodKey] = useState("3m");
 
@@ -29,14 +33,11 @@ export default function Reports({ customers, deleteVisit, openCustomer }) {
   const floor = useMemo(() => earliestVisit(customers) || today, [customers, today]);
   const [custom, setCustom] = useState(() => ({ from: floor, to: today }));
 
-  const setCustomPart = (part, value) =>
-    setCustom((prev) => clampRange({ ...prev, [part]: value }, { min: floor, max: today }));
-
   const period = periodKey === "custom" ? { key: "custom", ...custom } : periodByKey(periodKey);
   const range = resolveRange(period);
 
   return (
-    <div style={{ padding: "8px 16px 110px" }}>
+    <div style={screenPadding(layout)}>
       <div style={{ fontFamily: "'Roboto Slab', serif", fontWeight: 700, fontSize: 20, color: T.text, marginBottom: 12 }}>
         Reports
       </div>
@@ -68,7 +69,15 @@ export default function Reports({ customers, deleteVisit, openCustomer }) {
       )}
 
       {view !== "log" && periodKey === "custom" && (
-        <CustomRange range={custom} floor={floor} today={today} onChange={setCustomPart} />
+        <div style={{ marginBottom: 16 }}>
+          <DateRange
+            range={custom}
+            min={floor}
+            max={today}
+            onChange={setCustom}
+            caption={`${formatDate(custom.from)} — ${formatDate(custom.to)} · records start ${formatDate(floor)}, nothing before that to count.`}
+          />
+        </div>
       )}
 
       {view !== "log" && periodKey !== "custom" && (
@@ -77,10 +86,10 @@ export default function Reports({ customers, deleteVisit, openCustomer }) {
         </div>
       )}
 
-      {view === "counts" && <VisitCountsReport customers={customers} period={period} openCustomer={openCustomer} />}
+      {view === "counts" && <VisitCountsReport customers={customers} period={period} openCustomer={openCustomer} layout={layout} />}
       {view === "reasons" && <ReasonsReport customers={customers} period={period} openCustomer={openCustomer} />}
       {view === "log" && (
-        <div style={{ margin: "14px -16px 0" }}>
+        <div style={{ margin: `14px ${-layout.gutter}px 0` }}>
           <VisitLog customers={customers} deleteVisit={deleteVisit} openCustomer={openCustomer} embedded />
         </div>
       )}
@@ -88,90 +97,9 @@ export default function Reports({ customers, deleteVisit, openCustomer }) {
   );
 }
 
-/**
- * From and to, bounded by the data. Uses named months rather than a native
- * date input, whose MM/DD vs DD/MM rendering follows the browser locale and
- * cannot be overridden.
- */
-function CustomRange({ range, floor, today, onChange }) {
-  const row = { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
-  const tag = {
-    fontFamily: "'DM Sans', sans-serif",
-    fontSize: 11,
-    fontWeight: 700,
-    color: T.textDim,
-    width: 32,
-    flexShrink: 0,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  };
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <div style={row}>
-        <span style={tag}>From</span>
-        <span style={{ flex: 1, minWidth: 0 }}>
-          <DateSelect
-            label="From"
-            value={range.from}
-            min={floor}
-            max={range.to || today}
-            onChange={(v) => onChange("from", v)}
-          />
-        </span>
-      </div>
-      <div style={row}>
-        <span style={tag}>To</span>
-        <span style={{ flex: 1, minWidth: 0 }}>
-          <DateSelect
-            label="To"
-            value={range.to}
-            min={range.from || floor}
-            max={today}
-            onChange={(v) => onChange("to", v)}
-          />
-        </span>
-      </div>
-      <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: T.textDim, marginTop: 8, lineHeight: 1.5 }}>
-        {formatDate(range.from)} — {formatDate(range.to)} · records start {formatDate(floor)}, nothing before that to count.
-      </div>
-    </div>
-  );
-}
-
-function Segmented({ options, value, onChange }) {
-  return (
-    <div style={{ display: "flex", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: 3, gap: 3 }}>
-      {options.map((o) => {
-        const active = o.key === value;
-        return (
-          <button
-            key={o.key}
-            onClick={() => onChange(o.key)}
-            style={{
-              flex: 1,
-              background: active ? T.surface : "transparent",
-              border: active ? `1px solid ${T.border}` : "1px solid transparent",
-              borderRadius: 9,
-              padding: "8px 4px",
-              fontFamily: "'DM Sans', sans-serif",
-              fontWeight: 700,
-              fontSize: 11.5,
-              color: active ? T.text : T.textDim,
-              cursor: "pointer",
-              lineHeight: 1.2,
-            }}
-          >
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 /* ---------------- who is coming in ---------------- */
 
-function VisitCountsReport({ customers, period, openCustomer }) {
+function VisitCountsReport({ customers, period, openCustomer, layout }) {
   const [order, setOrder] = useState("most");
   const [query, setQuery] = useState("");
   const data = useMemo(
@@ -182,19 +110,7 @@ function VisitCountsReport({ customers, period, openCustomer }) {
 
   return (
     <div>
-      <div style={{ position: "relative", marginBottom: 10 }}>
-        <Search size={15} color={T.textDim} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search name or phone"
-          style={{
-            width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12,
-            padding: "11px 12px 11px 34px", color: T.text, fontFamily: "'DM Sans', sans-serif",
-            fontSize: 13, boxSizing: "border-box",
-          }}
-        />
-      </div>
+      <SearchField value={query} onChange={setQuery} placeholder="Search name or phone" style={{ marginBottom: 10 }} />
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 }}>
         <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: T.textDim }}>
@@ -212,6 +128,7 @@ function VisitCountsReport({ customers, period, openCustomer }) {
         </button>
       </div>
 
+      <div style={cardGrid(layout, { gap: 8 })}>
       {data.rows.map(({ customer, count, coversPeriod }) => (
         <button
           key={customer.id}
@@ -219,7 +136,7 @@ function VisitCountsReport({ customers, period, openCustomer }) {
           style={{
             width: "100%", display: "flex", alignItems: "center", gap: 11,
             background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14,
-            padding: "9px 12px", marginBottom: 8, cursor: "pointer", textAlign: "left",
+            padding: "9px 12px", cursor: "pointer", textAlign: "left",
           }}
         >
           <Avatar customer={customer} size={34} ring={count === 0 ? T.border : T.gold} />
@@ -248,6 +165,7 @@ function VisitCountsReport({ customers, period, openCustomer }) {
           </span>
         </button>
       ))}
+      </div>
 
       {data.rows.length === 0 && (
         <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: T.textDim, textAlign: "center", marginTop: 40 }}>

@@ -17,15 +17,21 @@ export function loadSaved() {
       customers: parsed.customers,
       actions: Array.isArray(parsed.actions) ? parsed.actions : [],
       reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
+      // Absent in anything saved before these lists existed.
+      reps: Array.isArray(parsed.reps) ? parsed.reps : [],
+      tiers: Array.isArray(parsed.tiers) ? parsed.tiers : [],
     };
   } catch {
     return null; // corrupt or unavailable storage falls back to the seed file
   }
 }
 
-export function save(customers, actions, reminders) {
+export function save(customers, actions, reminders, reps, tiers) {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ customers, actions, reminders }));
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({ customers, actions, reminders, reps: reps || [], tiers: tiers || [] })
+    );
   } catch {
     // Private mode or a full quota — the session still works, it just won't persist.
   }

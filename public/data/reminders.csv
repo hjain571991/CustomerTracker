@@ -1,10 +1,15 @@
-reminder_id,customer_id,customer_name,due_date,note
-r1,5,Laxmi Gold House,2026-10-22,Asked about an exchange on old gold
-r2,2,Shree Ambika Jewels,2026-10-25,Referral follow-up she mentioned
-r3,38,Shree Alankar,2026-10-14,Wedding season enquiry
-r4,17,Thakkar Bullion,2026-10-31,Ask about their Diwali order
-r5,11,Sethi Brothers,2026-11-01,Asked about an exchange on old gold
-r6,52,Shree Jewellers,2026-10-23,Referral follow-up she mentioned
-r7,26,Om Ornaments,2026-10-26,Check if the repair was collected
-r8,7,Iyer Brothers,2026-10-23,Wedding season enquiry
-r9,21,Gold Gold House,2026-10-24,Follow up on the silver order
+reminder_id,customer_id,customer_name,due_date,note,is_done
+r1,5,Laxmi Gold House,2026-10-23,Referral follow-up she mentioned,0
+r2,2,Shree Ambika Jewels,2026-10-24,Follow up on the silver order,0
+r3,29,New Zaveri,2026-11-07,Asked about an exchange on old gold,0
+r4,50,Gold Silver House,2026-10-28,Said to call after the festival,0
+r5,49,Chandra Bullion,2026-10-20,Check if the repair was collected,0
+r6,8,Deep Ornaments,2026-11-06,Wanted a bangle set quote,0
+r7,20,Padma Silver House,2026-10-27,Check if the repair was collected,0
+r8,30,Gold Ornaments,2026-11-02,Asked about an exchange on old gold,0
+r9,39,Shri Alankar,2026-11-05,Check if the repair was collected,0
+r10,1,Rajesh Traders,2026-10-08,Rang about the Diwali order,1
+r11,3,Patel & Sons,2026-10-15,Sent the new rate card,1
+r12,5,Laxmi Gold House,2026-10-24,Quoted for the bangle set,1
+r13,2,Shree Ambika Jewels,2026-11-19,Check in before the wedding season,0
+r14,6,Vraj Jewellers,2026-12-02,Quarterly catch-up,0

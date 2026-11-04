@@ -1,0 +1,5 @@
+tier_id,name,rank,is_active
+1,Key account,1,1
+2,Regular,2,1
+3,Occasional,3,1
+4,Trial,,0

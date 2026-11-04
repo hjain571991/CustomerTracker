@@ -14,6 +14,7 @@
 import { regularity, statusFor, targetFor, weeksSinceLastVisit } from "./analytics.js";
 import { reminderStatus } from "./analytics.js";
 import { currentWeekIndex, weekIndexOf } from "./weeks.js";
+import { tierRank } from "./tiers.js";
 
 /** What a retailer said when you rang. Fixed set — it becomes the churn report. */
 export const REASONS = [
@@ -55,18 +56,26 @@ const calledThisWeek = (customer, week) => {
  * One pass over the book, sorted into the sections the screen renders.
  * Every customer lands in at most one place, so nothing is chased twice.
  */
-export function buildFollowUps(customers, reminders, settings, now = new Date()) {
+export function buildFollowUps(customers, reminders, settings, { tiers = [], now = new Date() } = {}) {
   const week = currentWeekIndex(now);
+  // Importance is the *last* word, never the first. It separates customers the
+  // ordering above has already judged equally worth ringing — letting it do
+  // more would push a drifting top customer up the list on reputation while
+  // burying one who is genuinely further gone.
+  const tier = (a, b) => tierRank(a.customer, tiers) - tierRank(b.customer, tiers);
 
   const dueReminders = (reminders || [])
     .map((r) => {
+      // Completed reminders are kept for the Reminders screen's history, but
+      // this list is only ever the work still outstanding.
+      if (r.isDone) return null;
       const customer = customers.find((c) => c.id === r.customerId);
       if (!customer) return null;
       const status = reminderStatus(r, now);
       return status.key === "upcoming" ? null : { customer, reminder: r, status };
     })
     .filter(Boolean)
-    .sort((a, b) => a.reminder.dueOn.localeCompare(b.reminder.dueOn));
+    .sort((a, b) => a.reminder.dueOn.localeCompare(b.reminder.dueOn) || tier(a, b));
 
   const remindedIds = new Set(dueReminders.map((r) => r.customer.id));
 
@@ -99,12 +108,12 @@ export function buildFollowUps(customers, reminders, settings, now = new Date())
   }
 
   // Most established first among the freshly missed — the biggest thing at risk.
-  sections.missedLastWeek.sort((a, b) => b.visits - a.visits);
+  sections.missedLastWeek.sort((a, b) => b.visits - a.visits || tier(a, b));
   // Then by recoverability: least time away first, biggest customer to break ties.
-  sections.stillAway.sort((a, b) => a.weeksMissed - b.weeksMissed || b.visits - a.visits);
-  sections.neverReturned.sort((a, b) => a.weeksMissed - b.weeksMissed);
+  sections.stillAway.sort((a, b) => a.weeksMissed - b.weeksMissed || b.visits - a.visits || tier(a, b));
+  sections.neverReturned.sort((a, b) => a.weeksMissed - b.weeksMissed || tier(a, b));
   sections.snoozed.sort((a, b) => (a.customer.snoozedUntilWeek || 0) - (b.customer.snoozedUntilWeek || 0));
-  sections.called.sort((a, b) => b.visits - a.visits);
+  sections.called.sort((a, b) => b.visits - a.visits || tier(a, b));
   sections.cameBack.sort((a, b) => (b.customer.contact?.on || "").localeCompare(a.customer.contact?.on || ""));
 
   return {

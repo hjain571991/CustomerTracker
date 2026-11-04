@@ -1,11 +1,14 @@
 import React from "react";
-import { ChevronLeft, Phone, PhoneCall, Trash2 } from "lucide-react";
+import { Building2, ChevronLeft, MessageCircle, Pencil, Phone, PhoneCall, Trash2, UserCog } from "lucide-react";
 import { T, tint } from "../theme.js";
 import { avgGap, daysSinceLastVisit, regularity, statusFor, targetFor, visitDays } from "../lib/analytics.js";
 import { reasonLabel } from "../lib/followups.js";
 import { historyDays, visitCounts } from "../lib/visitCounts.js";
 import { formatDate } from "../lib/dates.js";
 import Avatar from "../components/Avatar.jsx";
+import TierBadge from "../components/TierBadge.jsx";
+import { useLayout } from "../lib/layout.js";
+import { whatsappLink } from "../lib/whatsapp.js";
 import CadencePicker from "../components/CadencePicker.jsx";
 
 /** Dots on a line: how far back each visit was, most recent on the right. */
@@ -46,7 +49,8 @@ function Timeline({ customer }) {
   );
 }
 
-export default function CustomerDetail({ customer, settings, back, openCalled, deleteCustomer, updateCustomer }) {
+export default function CustomerDetail({ customer, settings, back, openCalled, deleteCustomer, updateCustomer, openEdit }) {
+  const layout = useLayout();
   const status = statusFor(customer, settings);
   const target = targetFor(customer, settings);
   const since = daysSinceLastVisit(customer);
@@ -62,19 +66,52 @@ export default function CustomerDetail({ customer, settings, back, openCalled, d
   };
 
   return (
-    <div style={{ padding: "16px 16px 110px" }}>
+    <div style={{ padding: `16px ${layout.gutter}px calc(110px + var(--safe-bottom))`, maxWidth: layout.readable, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <button onClick={back} aria-label="Back" style={{ background: "none", border: "none", display: "flex", alignItems: "center", cursor: "pointer", padding: 0 }}>
           <ChevronLeft size={24} color={T.gold} />
         </button>
-        <button onClick={confirmDelete} aria-label={`Remove ${customer.name}`} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, lineHeight: 0 }}>
-          <Trash2 size={18} color={T.textDim} />
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button
+            onClick={openEdit}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background: T.surface,
+              border: `1px solid ${T.border}`,
+              borderRadius: 999,
+              padding: "7px 13px",
+              cursor: "pointer",
+            }}
+          >
+            <Pencil size={13} color={T.gold} />
+            <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, fontWeight: 700, color: T.gold }}>Edit</span>
+          </button>
+          <button onClick={confirmDelete} aria-label={`Remove ${customer.name}`} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, lineHeight: 0 }}>
+            <Trash2 size={18} color={T.textDim} />
+          </button>
+        </div>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, marginBottom: 18 }}>
         <Avatar customer={customer} size={88} ring={status.color} />
         <div style={{ fontFamily: "'Roboto Slab', serif", fontWeight: 700, fontSize: 19, color: T.text, textAlign: "center" }}>{customer.name}</div>
+        {customer.company && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: T.textDim }}>
+            <Building2 size={13} color={T.textDim} /> {customer.company}
+          </div>
+        )}
+        {(customer.repName || customer.tierName) && (
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "center" }}>
+            {customer.repName && (
+              <span style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: T.textDim, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 999, padding: "4px 11px" }}>
+                <UserCog size={12} color={T.gold} /> {customer.repName}
+              </span>
+            )}
+            <TierBadge customer={customer} style={{ fontSize: 11, padding: "4px 10px" }} />
+          </div>
+        )}
         {customer.phone && (
           <a href={`tel:${customer.phone}`} style={{ display: "flex", alignItems: "center", gap: 6, color: T.gold, textDecoration: "none", fontFamily: "'Roboto Mono', monospace", fontSize: 13 }}>
             <Phone size={13} /> {customer.phone}
@@ -104,13 +141,45 @@ export default function CustomerDetail({ customer, settings, back, openCalled, d
         </div>
       )}
 
-      <button
-        onClick={() => openCalled(customer)}
-        style={{ width: "100%", background: T.blue, border: "none", borderRadius: 16, padding: "13px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, cursor: "pointer", marginBottom: 18 }}
-      >
-        <PhoneCall size={18} color={T.onBlue} />
-        <span style={{ color: T.onBlue, fontFamily: "'DM Sans', sans-serif", fontWeight: 700, fontSize: 14 }}>Record a call</span>
-      </button>
+      <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+        <button
+          onClick={() => openCalled(customer)}
+          style={{ flex: 1, background: T.blue, border: "none", borderRadius: 16, padding: "13px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, cursor: "pointer" }}
+        >
+          <PhoneCall size={18} color={T.onBlue} />
+          <span style={{ color: T.onBlue, fontFamily: "'DM Sans', sans-serif", fontWeight: 700, fontSize: 14 }}>Record a call</span>
+        </button>
+
+        {/*
+          Opens the WhatsApp chat — no link can place a WhatsApp call, so the
+          button says what it does. Absent entirely when the stored number
+          cannot be made into one, rather than sitting there dead.
+        */}
+        {whatsappLink(customer.phone) && (
+          <a
+            href={whatsappLink(customer.phone)}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`Message ${customer.name} on WhatsApp`}
+            style={{
+              flex: 1,
+              background: tint(T.green, 0.16),
+              border: `1px solid ${tint(T.green, 0.32)}`,
+              borderRadius: 16,
+              padding: "13px 0",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+              textDecoration: "none",
+              cursor: "pointer",
+            }}
+          >
+            <MessageCircle size={18} color={T.green} />
+            <span style={{ color: T.green, fontFamily: "'DM Sans', sans-serif", fontWeight: 700, fontSize: 14 }}>WhatsApp</span>
+          </a>
+        )}
+      </div>
 
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: 16, marginBottom: 16 }}>
         <div style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 700, fontSize: 12, color: T.textDim, marginBottom: 8 }}>VISIT PATTERN</div>

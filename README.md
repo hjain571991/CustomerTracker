@@ -68,13 +68,15 @@ site data resets the PIN.
 
 ## The data lives in a spreadsheet
 
-Three tables, whether they arrive as CSV files or Google Sheet tabs:
+Five tables, whether they arrive as CSV files or Google Sheet tabs:
 
 | table | columns |
 |---|---|
-| `customers` | customer_id, name, phone, initials, visit_every_weeks, last_call_date, last_call_reason, last_call_note, snoozed_until |
+| `customers` | customer_id, name, phone, company, marketing_rep_id, marketing_rep, tier_id, tier, initials, visit_every_weeks, last_call_date, last_call_reason, last_call_note, snoozed_until |
 | `actions` | action_id, customer_id, visit_date, is_logged, logged_at |
-| `reminders` | reminder_id, customer_id, customer_name, due_date, note |
+| `reminders` | reminder_id, customer_id, customer_name, due_date, note, is_done |
+| `reps` | rep_id, name, is_active |
+| `tiers` | tier_id, name, rank, is_active |
 
 **`customer_id` is the join key.** A stable number the app assigns and never
 reuses — not derived from the name, so renaming a shop no longer orphans its
@@ -83,6 +85,21 @@ visits and reminders.
 **A visit is an action row, not a cell.** Undoing or deleting one flips
 `is_logged` to 0 rather than removing the row, so the log keeps a record of
 what was tapped and what was taken back.
+
+**A reminder ticked off is marked, not deleted.** `is_done` goes to 1 and the
+row stays, which is what makes the completed list on the Reminders screen
+possible.
+
+**`marketing_rep_id` is the join to `reps`, and `tier_id` to `tiers`;** the name
+beside each is there so the sheet reads sensibly to a human, and is rewritten
+from the list whenever an entry is renamed. A name typed straight onto a
+customer row with no matching list entry is adopted into the list on the next
+read rather than dropped, so editing the sheet by hand still works.
+
+**`rank` on `tiers` is the order of importance**, 1 first. It is renumbered to
+be contiguous on every read, so a sheet with duplicate or missing ranks still
+produces one unambiguous order — and a tier list with no `rank` column at all
+is taken in the order the rows appear, not alphabetically.
 
 ### Google Sheet as the database
 
@@ -106,8 +123,8 @@ a Sync button.
 ### Without a sheet
 
 The app still works entirely on the device. `public/data/*.csv` seed the first
-run, everything persists to `localStorage`, and Settings → Files exports the
-three CSVs or a three-tab `.xlsx`.
+run, everything persists to `localStorage`, and Settings → Backup writes the
+whole book to one `.xlsx` (see [Backups](#backups)).
 
 Header matching stays forgiving: case, spaces, underscores and synonyms all
 resolve (`Customer Name`, `mobile`, `frequency`). Dates may be `2026-09-05` or
@@ -177,6 +194,51 @@ requires.
 
 ---
 
+## Fitting every screen
+
+The app began as a phone screen and still is one on a phone. Three things make
+it behave everywhere else.
+
+**The hardware's own furniture.** An installed iOS app draws edge to edge —
+`viewport-fit=cover` plus a translucent status bar — so without allowing for it
+the header sits underneath the clock and the bottom tabs sit under the home
+indicator. The frame reserves all four insets:
+
+```css
+--safe-top: env(safe-area-inset-top, 0px);   /* and right / bottom / left */
+```
+
+They are named as variables rather than used inline so the fallback lives in
+one place, and so a test can stand in a notch that no desktop browser has.
+
+**The viewport that moves.** iOS Safari's `100vh` is the height the page
+*would* have with the address bar hidden, so a `vh`-sized app hangs off the
+bottom until you scroll. The frame is `100vh` then `100dvh` — a cascade, which
+is why that one rule is a CSS class and not an inline style: a browser without
+`dvh` keeps the first line, and the body is `position: fixed` so the page
+itself never scrolls, only the app's own panes.
+
+**Growing into the space.** On an iPad or a desktop browser a 460px column
+stranded in a 1440px window wastes most of the screen, so the shell opens out,
+the gutters widen, and every list reflows into as many columns as fit:
+
+| window | shell | gutter | lists |
+|---|---|---|---|
+| phone (<700px) | full width | 16px | one column |
+| tablet (700–1099px) | 860px | 24px | two columns |
+| desktop (≥1100px) | 1200px | 32px | three or more |
+
+Breakpoints are on the *window*, not the device: a desktop browser dragged
+narrow behaves like a phone, because at that width it is one. Grid columns use
+`minmax(min(100%, 340px), 1fr)`, and the `min()` is what stops a 340px minimum
+overflowing a 320px phone.
+
+Forms and the customer detail stay a readable column however wide the window
+gets — a form is read line by line, and stretching one to 1200px helps nobody.
+The bottom sheets and the tab bar centre themselves for the same reason.
+
+---
+
 ## Installing it on a phone
 
 The deployed URL is the app. No store, no build per platform.
@@ -195,7 +257,8 @@ service-worker cached, and the customer data is already on the device.
 ## Project layout
 
 ```
-public/data/          customers.csv, reminders.csv — the starting data
+public/data/          customers.csv, actions.csv, reminders.csv, reps.csv,
+                      tiers.csv — the starting data
 public/icons/         generated PWA icons (do not edit; see scripts/)
 src/theme.js          colour tokens and status definitions
 src/lib/dates.js      ISO dates <-> days-ago; forgiving spreadsheet date parsing
@@ -211,14 +274,58 @@ src/lib/visits.js     adding and removing a visit; the undo rules
 src/lib/visitLog.js   every visit flattened and grouped by day
 src/lib/visitCounts.js how many visits in the last 4 weeks / 3 / 6 / 12 months
 src/lib/reports.js    book-wide: visit counts per customer, churn reasons
+src/lib/lookups.js    the shared machinery behind the owner's short lists
+src/lib/reps.js       the marketing-rep list, and customers-per-rep with status
+src/lib/tiers.js      customer tiers: the order, and the call-list tie-break
+src/lib/reminders.js  every reminder grouped into overdue/today/upcoming/done
+src/lib/layout.js     breakpoints, gutters and the reflowing card grid
+src/lib/printReports.js  the per-rep call sheets and round sheets
+src/lib/whatsapp.js   turning a shop's phone number into a wa.me link
+src/lib/importCustomers.js  planning a bulk add: what it would change, before it does
+src/lib/xlsxZip.js    just enough ZIP to reopen an .xlsx and edit one part
+src/lib/xlsxValidation.js  the template's dropdowns, which SheetJS cannot write
+src/lib/collapsed.js  which call-list sections are folded away
 src/lib/sheets.js     the Apps Script client and row builders
 src/lib/sync.js       outbox queue, flush-then-read
 google-apps-script/   the sheet backend and its setup guide
-src/components/       Avatar, Sheet, DayStepper, PinPad, the bottom sheets
-src/screens/          StaffHome, PinGate, FollowUps, Customers, Detail, Add, Reports, VisitLog, Settings
+src/components/       Avatar, Sheet, DayStepper, PinPad, SearchField, DateRange,
+                      Segmented, ManagedList, RepPicker, TierPicker, TierBadge,
+                      Calendar, PrintSheets, ImportPreviewSheet, the bottom sheets
+src/screens/          StaffHome, PinGate, FollowUps, Reminders, Customers, Detail,
+                      Add, EditCustomer, Reports, VisitLog, Settings
 src/App.jsx           data loading, state, navigation shell
 scripts/              icon generator, seed-data generator, smoke tests
 ```
+
+## Searching
+
+Every list screen searches, and they all match more than the name:
+
+| screen | matches |
+|---|---|
+| Staff home | name, company, phone |
+| Customers | name, company, phone, rep |
+| Customers → By rep | representative |
+| Reminders | customer name, phone, note — plus a due-date range |
+| Reports → Visits | name, phone |
+| Reports → Log | name, phone — plus a visit-date range |
+
+The staff screen's wall is **A–Z**, in two groups: everyone who has not been in
+today, then — dimmed, below a heading — everyone already logged today. It is
+alphabetical because the screen is used with a customer standing at the
+counter, so you are looking for one known name rather than browsing; and
+today's taps sink because once somebody is logged they are dealt with, leaving
+the work still outstanding at the top. The heading only appears once the first
+customer has been tapped in, and the whole thing resets itself overnight with
+no state to manage. A dimmed card is still fully tappable — a second tap the
+same day changes nothing.
+
+The staff screen's box clears with a button rather than only the backspace key:
+it is used one-handed with a customer standing at the counter, and a dead end
+there is worse than a dead end anywhere else in the app — so an empty result
+offers *Show everyone* rather than leaving you stuck.
+
+---
 
 ## How a customer's status is worked out
 
@@ -319,7 +426,282 @@ Only the **most recent call per customer** is stored, so this counts people,
 not calls. A customer rung twice contributes their latest reason once. Storing
 every call would need a third sheet.
 
-**Log** — the full visit history, grouped by day, with delete.
+**Log** — the full visit history, grouped by day, with delete. **Search by
+date** opens a from/to pair bounded by the records; setting both ends to the
+same day searches that one date. A range is an explicit choice of period, so it
+replaces the rolling 30-day window rather than narrowing it — asking for last
+March and getting nothing because it falls outside the last month would be a
+bug, not a filter.
+
+---
+
+## Editing a customer
+
+**Customers → a customer → Edit** opens the whole record: name, phone, company,
+marketing rep, tier, the initials on the badge, and the restock cadence. It is a form
+with a Save button rather than a screen of live controls — correcting a misspelt
+name usually means changing two or three things and confirming, and leaving by
+the back arrow discards.
+
+The initials follow the name automatically, but stop doing so the moment you
+type your own. The last recorded call can be cleared here, which is the only
+place it can be: *Record a call* can overwrite the last one but never remove a
+call logged against the wrong shop.
+
+**Visits are not editable here.** They are an append-only log of what was
+tapped, corrected by deleting the specific entry in **Reports → Log** — which
+keeps the audit trail honest in a way a free-text field would not.
+
+---
+
+## Customer tiers
+
+Some retailers matter more than others. **Settings → Customer tiers** is a list
+you maintain — call them A/B/C, Key/Regular/Occasional, whatever you already
+say out loud — and the arrows set the order, which is the only part of a tier
+the app actually reads. Grading a customer is optional, on both the Add and
+Edit forms.
+
+**A tier breaks ties on the call list, and only ties.** It does not change
+whether a customer is overdue, which group they land in, or how often they are
+expected — those come from their own visit rhythm. Where two customers are
+equally worth ringing, the higher tier goes first:
+
+```
+STILL AWAY
+  Patel & Sons      [Key account]   missed 2 weeks · 9 visits
+  Verma Brothers    [Regular]       missed 2 weeks · 9 visits   ← same facts,
+  Gold Ornaments                    missed 2 weeks · 9 visits     tier decides
+  Sri Jewellers     [Key account]   missed 6 weeks · 4 visits   ← further gone,
+                                                                  still below
+```
+
+That restraint is the point. Letting importance outrank recoverability would
+push a top customer up the list on reputation while burying one who is
+genuinely further gone — and a key account quietly drifting away is exactly
+what this app exists to catch, so it must never be flattered by its own grade.
+
+**Ungraded is not the same as lowest.** A customer nobody has got round to
+classifying sorts *after* everyone with a tier, including the bottom one —
+sorting them as least important would be inventing a judgement nobody made.
+
+Removing a tier deactivates it; customers stay on it and keep a readable name,
+and **reassign** moves them in one go. The order renumbers itself to stay
+contiguous, so there is never a hole where a tier used to be.
+
+---
+
+## Adding customers in bulk
+
+**Settings → Add customers in bulk** is the one to use for a batch of new
+shops. Two steps:
+
+1. **Download the template** — a blank `.xlsx` with the right columns, an
+   instructions tab, and **dropdowns** on the three columns that have a right
+   answer:
+
+   | column | accepts |
+   |---|---|
+   | `marketing_rep` | only your reps, from a list |
+   | `tier` | only your tiers, from a list |
+   | `visit_every_weeks` | a whole number of weeks, 1–52 |
+
+   All three still accept blank, because all three are optional. Typed
+   free-hand, "Priya", "priya shah" and "P. Shah" are three people by the time
+   the file comes back; a dropdown makes that impossible as it is typed rather
+   than explaining it afterwards. To use a rep or tier you do not have yet, add
+   it in the app and download the template again.
+2. **Add customers from a file** — fill in one row per customer and feed it
+   back.
+
+| column | |
+|---|---|
+| `name` | required |
+| `phone` `company` `marketing_rep` `tier` `visit_every_weeks` | all optional |
+
+It **merges**; it does not replace. Three rules:
+
+- Rows match existing customers **by name**, folded for case and spacing, so
+  `  patel   &   sons ` finds *Patel & Sons*. There is no id column — asking
+  somebody to look up internal ids to add a customer is how spreadsheets go
+  wrong.
+- A **blank cell says nothing**. It never clears what you already have; only a
+  value actually present can change anything.
+- **Visits, reminders, calls and snoozes are never touched.** The file is a
+  list of customers, not a record of what happened to them.
+
+A rep or tier the file introduces is still created automatically — the
+template's dropdowns mean that will not happen from a template, but any other
+spreadsheet can still bring one in. A new tier goes last in the order, because
+you rank your tiers deliberately and a spreadsheet does not get a say.
+
+Nothing is written until you have seen the plan:
+
+```
+From new-customers.xlsx — 10 rows read
+
+ 8 new customers
+   Bulk Shop 1 · Bulk 1 Ltd · 9800000010 · Wholesale · Kiran Patel
+   …
+ 1 already on your list is updated
+   Laxmi Gold House · rep
+ Added to your lists
+   Kiran Patel · new marketing rep
+   Wholesale · new tier, placed last in the order
+
+ 1 row matches what you already have and is left alone.
+
+        [ Cancel ]        [ Add 8, update 1 ]
+```
+
+> **Not to be confused with *Import spreadsheet*** under Files, which replaces
+> the entire book — right for moving a whole book in, catastrophic for "here
+> are ten new shops".
+
+### If you keep a Google Sheet
+
+You can also just type the rows into the sheet's `customers` tab. Leave
+`customer_id` blank and the app assigns one on the next sync; a rep or tier
+name typed straight into those columns is adopted the same way.
+
+---
+
+## Backups
+
+**Settings → Back up everything now** writes one dated `.xlsx` —
+`visit-tracker-backup-2026-10-29.xlsx` — holding every table *and* your
+settings:
+
+| tab | what it holds |
+|---|---|
+| `customers` `actions` `reminders` `reps` `tiers` | the whole book |
+| `meta` | the backup format, when it was taken, and your saved settings |
+
+**Restore from a backup** reads it straight back and puts the app exactly as it
+was — including the default cadence, the rep list and the tier order. The round
+trip is lossless, and tested as such: `npm test` writes a backup of the sample
+book, reads it back, and compares every field on every customer.
+
+Open it in Excel or upload it to Google Sheets to read, since it is an ordinary
+spreadsheet. **Import spreadsheet** still takes any sheet; the difference is
+only that a backup also carries the `meta` tab, so restoring from one puts the
+settings back too and importing an ordinary sheet leaves them alone.
+
+Take one before anything risky — *Reset to the shipped file* says as much — and
+keep it somewhere that isn't the phone.
+
+---
+
+## Printing a round
+
+**Customers → By rep → Print** produces one sheet per representative, to hand
+over. Two documents, because they answer two different questions:
+
+| sheet | what it is |
+|---|---|
+| **Follow-ups** | Who to call, grouped the way the call list groups them, with a tick box and ruled space to write down what each customer said. The sheet that comes back marked up. |
+| **Their list** | That rep's whole book, one line each — a round sheet, not a call sheet. |
+
+Print everyone at once and each rep starts on a fresh sheet of paper, so the
+stack tears apart; or pick one rep. Customers with **no** rep get their own
+sheet too — they still need ringing, and leaving them off paper is how they get
+forgotten. A rep with nobody to call prints nothing rather than a blank page.
+
+A call sheet carries what the conversation needs: the name, tier and number,
+the company, how overdue they are against their own cadence, how many visits
+they have made, how regular they are, and what they said last time they were
+rung.
+
+```
+Priya Shah                                        31 Oct 2026
+Follow-ups · 12 to call of 20 customers
+═════════════════════════════════════════════════════════════
+MISSED LAST WEEK · 1
+☐  Patel & Sons  [Key account]  9811122334        WHAT THEY SAID
+   Patel Enterprises · Missed 4 weeks · weekly    ______________
+   · last in 40 days ago · 4 visits · irregular   ______________
+   Last call 23 Oct — Price: "Zaveri Bazaar is cheaper"
+```
+
+The sheet is its own white, black-on-paper document, not a screenshot of the
+dark app — printing that would empty a cartridge and still be hard to read. It
+is the same markup on screen and on paper, so the preview is honest about what
+comes out of the printer. Customers are never split across a page break.
+
+---
+
+## Marketing representatives
+
+Who looks after each retailer. Maintained as a list under **Settings →
+Marketing representatives** and offered as a dropdown when adding or editing a
+customer, rather than typed free-hand: left as free text, "Priya Shah", "priya"
+and "P. Shah" become three people, and counting customers per rep is the only
+reason the field exists.
+
+**Customers → By rep** answers the question the field was added for. Each rep is
+one row: how many retailers are on them, and how those retailers are doing —
+
+```
+Priya Shah        2 missed       24 customers
+  ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇░░░░
+Anil Kumar        5 missed       16 customers
+Unassigned        1 missed       10 customers
+```
+
+The count is what gets asked for; the split is what is worth knowing. Forty
+retailers with fifteen missed is a different conversation to forty on track.
+Searching narrows to one rep, and expanding a row lists the retailers behind
+the number with their status.
+
+Removing a rep marks them inactive rather than deleting them. Their customers
+stay assigned — those retailers still belong to somebody until the owner says
+otherwise, and silently emptying the field on forty rows because someone left
+is the kind of data loss nobody notices until the report is wrong. The rep's
+row keeps showing in the report for as long as anyone is on it, and **reassign**
+moves them in one go.
+
+---
+
+## Reminders
+
+**Follow-ups → All reminders** is every reminder ever set, grouped into
+**overdue**, **due today**, **upcoming** and **completed**. The call list beside
+it stays what it always was — only today's work — because that is what makes it
+usable on a Monday morning.
+
+Anything on the screen can be edited: the due date, the note, whether it is
+done. Editing picks an absolute date rather than "in N days", because changing
+a reminder is almost always "not Tuesday, the 14th" — and counting forward from
+today for something already overdue would mean counting backwards.
+
+**Ticking one off marks it done; it does not delete it.** The sheet always kept
+the row, and "I rang them about the Diwali order three weeks ago" is worth
+holding on to. Completed reminders can be hidden, searched and date-filtered,
+and put back if one was ticked by mistake. Deleting is still there for a
+reminder that should never have existed — like a removed customer, the sheet
+keeps the row and a blanked due date is what marks it gone.
+
+---
+
+## Logging a visit for an earlier day
+
+The clock icon on a staff card opens **When did they come in?** — yesterday and
+the day before as one tap each, with their real dates shown, then a calendar
+for anything older.
+
+It asks for a *date*, not a countdown. The old picker offered "17 days ago",
+which is the wrong question to put to somebody who remembers when a customer
+came in rather than how many sleeps have passed since — every use of it was a
+small arithmetic puzzle. `logVisit` now takes the day itself for the same
+reason.
+
+Weeks run Monday-first, matching the trading week, with Sunday dimmed at the
+end of the row because that is the day the shop is shut. Days already recorded
+are marked with a green dot rather than disabled — tapping one is a harmless
+no-op, and seeing which days are already down is what stops the same visit
+being logged twice. Nothing after today can be picked, and the calendar reaches
+twelve months back: far enough to fix anything anyone actually remembers, short
+enough that a stray tap cannot land a visit in a year nobody is thinking about.
 
 ---
 
@@ -364,8 +746,27 @@ established a pattern at all:
 | **Snoozed** | out of sight until the weeks run out |
 | **Never came back** | one or two visits, then gone — a different conversation |
 
-Only the first three are open by default; the rest collapse so the screen opens
-on the work.
+**Every section folds.** The first three open by default, so the screen still
+lands on today's work with no taps; the rest start folded. On a long Monday
+"Still away" can run to forty cards, which buries the two people who only
+missed last week — being able to put it away is the difference between a list
+you work through and one you scroll past. Folded, the screen becomes a summary:
+
+```
+ › REMINDERS YOU SET  6
+ › MISSED LAST WEEK   4
+ › STILL AWAY        25
+ › CAME BACK          5
+ › SNOOZED            2
+ › NEVER CAME BACK    7
+```
+
+The count stays on the header, so a folded section still says how much is
+behind it and nothing vanishes quietly. Folds are **remembered** — the screen
+unmounts whenever you tap into a customer, and re-expanding everything on the
+way back would make folding pointless. Only sections you have actually touched
+are stored, so one added in a later version arrives as it was designed to
+rather than inheriting whatever was in storage.
 
 ### Ordering: recoverable first, not worst first
 
@@ -374,6 +775,33 @@ lost; one who missed a single week has probably just been busy, and a call will
 bring them back. So the working list runs **fewest weeks missed first**, and
 among equals the **most established customer** goes above — the biggest thing
 still at risk.
+
+### WhatsApp
+
+Every row on the call list and on the reminders list carries a **WhatsApp**
+button, and so does the customer detail screen — beside *Record a call*. It
+opens the chat with that customer.
+
+It opens the chat rather than placing a call because that is the only thing a
+link can do: WhatsApp publishes no URL that starts a voice call, so the button
+says WhatsApp rather than Call and the call is one tap away once the chat is
+open.
+
+Numbers are stored the way a shop writes them — ten digits, no country code —
+and `wa.me` needs the full international number, so **+91** is added. A number
+that already carries a country code keeps the one it has: prefixing 91 onto a
+Dubai number would link to a stranger. A trunk zero is dropped, and a number
+that cannot be made into a usable one shows no button at all rather than a dead
+one.
+
+```
+9820011223        →  wa.me/919820011223
++971 50 123 4567  →  wa.me/971501234567
+00 91 98200 11223 →  wa.me/919820011223
+12345             →  no button
+```
+
+---
 
 ### Two actions
 

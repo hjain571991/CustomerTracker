@@ -124,19 +124,64 @@ about 15,000 cells a year — so roughly a lifetime of trading before it matters
   when the internet returns, and when you tap **Sync**
 - Writes update **one row at a time**, so a cell you edit by hand in the sheet
   is not wiped by the app
-- **Nothing is deleted.** Undoing a visit sets `is_logged` to 0; dismissing a
-  reminder sets `is_done`. The history stays.
+- **Nothing is deleted.** Undoing a visit sets `is_logged` to 0; ticking off a
+  reminder sets `is_done`; removing a representative or a tier sets
+  `is_active` to 0. The history stays.
+- **The sheet is not your backup.** It is the live copy, so a mistake syncs to
+  it like anything else. Take a real backup from Settings → *Back up
+  everything now* as well.
 
-## The three tabs
+## The five tabs
 
 | tab | what each row is |
 |---|---|
 | `customers` | one shop |
 | `actions` | one visit — this is your action log |
 | `reminders` | one note-to-self to call someone |
+| `reps` | one marketing representative |
+| `tiers` | one customer tier, in order of importance |
 
-`customer_id` links them. It is a number the app assigns and never reuses, so
-renaming a shop does not break its visits or reminders.
+`customer_id` links the first three. It is a number the app assigns and never
+reuses, so renaming a shop does not break its visits or reminders.
+`marketing_rep_id` and `tier_id` link a shop to its representative and its tier
+in the same way — rename either in the app and every one of their rows is
+updated.
+
+You can type a name straight into the `marketing_rep` or `tier` column without
+touching the `reps` or `tiers` tab. The app adds anything it finds there to the
+list on the next read, so editing by hand never loses the assignment.
+
+On `tiers`, **`rank` is the order of importance** — 1 is the most important.
+The app renumbers it to run 1, 2, 3… on every read, so you can leave gaps or
+duplicates and it will still produce one clear order. A `tiers` tab with no
+`rank` column is read top to bottom.
+
+---
+
+## Updating the script later
+
+The sheet's script does **not** update when this project does. If the app says
+the script is out of date, or a new field never appears in the sheet:
+
+1. Open the sheet → **Extensions** → **Apps Script**
+2. Select all, delete, and paste in the latest `Code.gs` again
+3. **Save**, then — this is the step everyone misses — **Deploy** → **Manage
+   deployments** → the **✏ pencil** → **Version: New version** → **Deploy**
+
+Saving the editor does *not* republish the web app. Settings → Google Sheet →
+**Test** shows the version actually being served, so you can tell at a glance
+whether the redeploy took.
+
+**Nothing is lost by updating.** New columns are appended to the tabs that need
+them, and rows are written against whatever headings your sheet actually has —
+so existing data, and any extra columns of your own, stay exactly where they
+are.
+
+| script version | added |
+|---|---|
+| 5 | the `tiers` tab, and `tier_id` / `tier` on customers |
+| 4 | the `reps` tab, `company` / `marketing_rep_id` / `marketing_rep` on customers, `is_done` on reminders |
+| 3 | bulk upload in chunks |
 
 ---
 
