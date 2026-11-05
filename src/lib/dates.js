@@ -11,8 +11,8 @@ function startOfDay(d) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
-export function todayIso() {
-  return toIso(new Date());
+export function todayIso(from = new Date()) {
+  return toIso(from);
 }
 
 export function toIso(d) {

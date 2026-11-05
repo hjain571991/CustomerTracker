@@ -1,17 +1,24 @@
 import { parseCsv, toCsv } from "./csv.js";
 import { parseDate, toIso, todayIso } from "./dates.js";
 import { mondayOfWeek, weekIndexOf } from "./weeks.js";
-import { parseWeeks, weeksFromDays } from "./settings.js";
+import { MAX_WEEKS, MIN_WEEKS, parseWeeks, weeksFromDays } from "./settings.js";
 import { isReason } from "./followups.js";
 import { initialsFor } from "./analytics.js";
+import { applyReps, reconcileReps } from "./reps.js";
+import { applyTiers, reRankTiers, reconcileTiers } from "./tiers.js";
+import { listKey, sortList } from "./lookups.js";
+import { TEMPLATE_COLUMNS } from "./importCustomers.js";
+import { addValidations, templateRules } from "./xlsxValidation.js";
 
 /**
  * Everything that turns a spreadsheet into app data, and back again.
  *
- * Three tables, whether they arrive as CSV files or Google Sheet tabs:
- *   customers — customer_id, name, phone, visit_every_weeks, …
+ * Five tables, whether they arrive as CSV files or Google Sheet tabs:
+ *   customers — customer_id, name, phone, company, marketing_rep_id, tier_id, …
  *   actions   — customer_id, visit_date, is_logged   (one row per tap)
- *   reminders — customer_id, due_date, note
+ *   reminders — customer_id, due_date, note, is_done
+ *   reps      — rep_id, name, is_active  (the marketing representatives)
+ *   tiers     — tier_id, name, rank, is_active  (how important a customer is)
  *
  * `customer_id` is the join key everywhere. It is a stable incremental number
  * written into the sheet, not derived from the name — renaming a shop used to
@@ -29,6 +36,14 @@ const CUSTOMER_FIELDS = {
   customerId: ["customerid", "custid", "id", "code"],
   name: ["name", "customername", "customer", "shop", "shopname", "party", "partyname"],
   phone: ["phone", "phonenumber", "mobile", "mobileno", "contact", "contactnumber", "number"],
+  company: ["company", "companyname", "firm", "firmname", "business", "businessname", "organisation", "organization"],
+  repId: ["marketingrepid", "repid", "representativeid", "salesrepid"],
+  repName: [
+    "marketingrep", "marketingrepresentative", "representative", "rep", "salesrep",
+    "salesperson", "accountmanager", "assignedto", "repname", "marketingexec",
+  ],
+  tierId: ["tierid", "customertierid", "gradeid"],
+  tierName: ["tier", "customertier", "grade", "category", "segment", "importance", "class", "tiername"],
   initials: ["initials", "shortcode"],
   visitEveryWeeks: [
     "visiteveryweeks", "everyweeks", "weeks", "frequencyweeks", "cycleweeks",
@@ -61,6 +76,20 @@ const REMINDER_FIELDS = {
   name: ["customername", "customer", "name", "shop", "shopname"],
   dueOn: ["duedate", "dueon", "calldate", "remindon", "reminderdate", "due"],
   note: ["note", "notes", "reason", "about", "comment"],
+  isDone: ["isdone", "done", "completed", "complete", "dismissed"],
+};
+
+const REP_FIELDS = {
+  repId: ["repid", "marketingrepid", "id", "code"],
+  name: ["name", "repname", "marketingrep", "representative", "rep", "fullname", "person"],
+  isActive: ["isactive", "active", "enabled", "inuse"],
+};
+
+const TIER_FIELDS = {
+  tierId: ["tierid", "id", "code"],
+  name: ["name", "tier", "tiername", "grade", "label"],
+  rank: ["rank", "order", "priority", "position", "level", "sort", "sortorder"],
+  isActive: ["isactive", "active", "enabled", "inuse"],
 };
 
 const normalizeHeader = (h) => String(h || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -115,6 +144,12 @@ function normalizeReason(value) {
 
 const sortDatesDesc = (dates) => [...new Set(dates)].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
 
+/**
+ * A yes/no cell. Anything but an explicit 0/false/no reads as true, so a blank
+ * column in a hand-made sheet behaves the way a person reading it would expect.
+ */
+const isFalsey = (v) => /^(0|false|no|n)$/i.test(text(v));
+
 export class DataError extends Error {}
 
 const asId = (v) => {
@@ -155,6 +190,11 @@ export function normalizeCustomers(rows) {
       existing.visits = sortDatesDesc([...existing.visits, ...visits]);
       if (contact && (!existing.contact || contact.on > existing.contact.on)) existing.contact = contact;
       if (!existing.phone && f.phone) existing.phone = String(f.phone).trim();
+      if (!existing.company && f.company) existing.company = text(f.company);
+      if (!existing.repName && f.repName) existing.repName = text(f.repName);
+      if (!existing.repId && f.repId) existing.repId = text(f.repId);
+      if (!existing.tierName && f.tierName) existing.tierName = text(f.tierName);
+      if (!existing.tierId && f.tierId) existing.tierId = text(f.tierId);
       if (existing.visitEveryWeeks == null) {
         existing.visitEveryWeeks = parseWeeks(f.visitEveryWeeks) ?? weeksFromDays(f.legacyDays);
       }
@@ -171,6 +211,14 @@ export function normalizeCustomers(rows) {
       id,
       name,
       phone: f.phone == null ? "" : String(f.phone).trim(),
+      company: text(f.company),
+      // Resolved against the rep list by `applyReps`; until then this is just
+      // whatever the sheet said.
+      repId: text(f.repId) || null,
+      repName: text(f.repName),
+      // Same story for the tier: resolved against the list by `applyTiers`.
+      tierId: text(f.tierId) || null,
+      tierName: text(f.tierName),
       initials: f.initials ? String(f.initials).trim().slice(0, 2).toUpperCase() : initialsFor(name),
       visitEveryWeeks: parseWeeks(f.visitEveryWeeks) ?? weeksFromDays(f.legacyDays),
       visits: sortDatesDesc(visits),
@@ -212,9 +260,8 @@ export function normalizeActions(rows, customers) {
         actionId: text(f.actionId) || `a${seq}`,
         customerId: customer.id,
         date,
-        // Anything but an explicit 0/false/no counts as logged, so a blank
-        // column in a hand-made sheet behaves as "yes, they came".
-        isLogged: !/^(0|false|no|n)$/i.test(text(f.isLogged)),
+        // A blank column reads as "yes, they came" — see `isFalsey`.
+        isLogged: !isFalsey(f.isLogged),
         loggedAt: text(f.loggedAt) || null,
       };
     })
@@ -263,9 +310,112 @@ export function normalizeReminders(rows, customers) {
         customerId: customer.id,
         dueOn,
         note: f.note == null ? "" : String(f.note).trim(),
+        // Blank means "still outstanding" — the opposite default to is_logged,
+        // because a reminder nobody has marked is one nobody has done.
+        isDone: text(f.isDone) !== "" && !isFalsey(f.isDone),
       };
     })
     .filter(Boolean);
+}
+
+/**
+ * The marketing-representative list. Names are the one thing that must be
+ * unique — two rows called "Priya Shah" are one person typed twice, and
+ * merging them is the only reading that keeps the report countable.
+ */
+export function normalizeReps(rows) {
+  const out = [];
+  const taken = new Set();
+  const byName = new Map();
+  const needsId = [];
+
+  (rows || []).forEach((row) => {
+    const f = pick(row, REP_FIELDS);
+    const name = text(f.name);
+    if (!name) return; // blank spacer rows are common in hand-kept sheets
+
+    const existing = byName.get(listKey(name));
+    if (existing) {
+      // Active anywhere wins: a rep listed twice, once retired, is still working.
+      existing.isActive = existing.isActive || !isFalsey(f.isActive);
+      return;
+    }
+
+    let id = asId(f.repId);
+    if (id && taken.has(id)) id = null;
+    if (id) taken.add(id);
+
+    const rep = { id, name, isActive: text(f.isActive) === "" || !isFalsey(f.isActive) };
+    if (!id) needsId.push(rep);
+    byName.set(listKey(name), rep);
+    out.push(rep);
+  });
+
+  let next = 1;
+  for (const rep of needsId) {
+    while (taken.has(String(next))) next += 1;
+    rep.id = String(next);
+    taken.add(rep.id);
+  }
+
+  return out;
+}
+
+// Far above any rank a person would type, so unranked rows sort after ranked
+// ones while still holding the order they appeared in.
+const UNRANKED_BASE = 100000;
+
+/**
+ * The customer-tier list. Order is the whole point — tier 1 outranks tier 2 —
+ * so a missing or duplicated `rank` is renumbered from the order the rows
+ * arrive in rather than left to collide.
+ */
+export function normalizeTiers(rows) {
+  const out = [];
+  const taken = new Set();
+  const byName = new Map();
+  const needsId = [];
+
+  (rows || []).forEach((row) => {
+    const f = pick(row, TIER_FIELDS);
+    const name = text(f.name);
+    if (!name) return; // blank spacer rows are common in hand-kept sheets
+
+    const existing = byName.get(listKey(name));
+    if (existing) {
+      existing.isActive = existing.isActive || !isFalsey(f.isActive);
+      return;
+    }
+
+    let id = asId(f.tierId);
+    if (id && taken.has(id)) id = null;
+    if (id) taken.add(id);
+
+    const stated = Math.trunc(Number(text(f.rank)));
+    const tier = {
+      id,
+      name,
+      // A row with no rank takes its place from where it sits in the sheet,
+      // pushed below every row that does state one. Falling back to
+      // alphabetical instead would quietly make "Bronze" outrank "Gold".
+      rank: Number.isFinite(stated) && stated > 0 ? stated : UNRANKED_BASE + out.length,
+      isActive: text(f.isActive) === "" || !isFalsey(f.isActive),
+    };
+    if (!id) needsId.push(tier);
+    byName.set(listKey(name), tier);
+    out.push(tier);
+  });
+
+  let next = 1;
+  for (const tier of needsId) {
+    while (taken.has(String(next))) next += 1;
+    tier.id = String(next);
+    taken.add(tier.id);
+  }
+
+  // Renumbered 1..n so the order is always contiguous and unique, whatever
+  // the sheet said — the provisional ranks above only settle the sequence.
+  return reRankTiers(out);
 }
 
 function sheetRows(workbook, aliases) {
@@ -288,8 +438,8 @@ function sheetNameFor(names, wanted) {
   return names.find((n) => want.includes(normalizeHeader(n))) || names[0];
 }
 
-/** Row objects -> `{ customers, actions, reminders }`, joined on customer_id. */
-function buildData(customerRows, actionRows, reminderRows) {
+/** Row objects -> `{ customers, actions, reminders, reps, tiers }`, joined on customer_id. */
+function buildData(customerRows, actionRows, reminderRows, repRows, tierRows) {
   const customers = normalizeCustomers(customerRows);
   if (!customers.length) {
     throw new DataError(
@@ -299,12 +449,22 @@ function buildData(customerRows, actionRows, reminderRows) {
   // An actions table wins; without one, any packed visit_dates cells become actions.
   const actions = actionRows ? normalizeActions(actionRows, customers) : actionsFromCustomers(customers);
   const reminders = reminderRows ? normalizeReminders(reminderRows, customers) : [];
-  return { customers: applyActions(customers, actions), actions, reminders };
+  // A rep named on a customer row but missing from the list is adopted into it,
+  // so a sheet edited by hand keeps the assignment.
+  const reps = reconcileReps(normalizeReps(repRows), customers);
+  const tiers = reconcileTiers(normalizeTiers(tierRows), customers);
+  return {
+    customers: applyTiers(applyReps(applyActions(customers, actions), reps), tiers),
+    actions,
+    reminders,
+    reps,
+    tiers,
+  };
 }
 
 /** Parses a customers CSV. Synchronous — no spreadsheet library involved. */
 export function parseCustomersCsv(text) {
-  return buildData(parseCsv(text), null, null);
+  return buildData(parseCsv(text), null, null, null, null);
 }
 
 /** Parses a real workbook, loading SheetJS on demand. */
@@ -326,12 +486,20 @@ export async function parseWorkbook(data, filename = "") {
   const customerSheet = sheetNameFor(workbook.SheetNames, ["customers", "customer", "sheet1"]);
   const actionSheet = workbook.SheetNames.find((n) => normalizeHeader(n).startsWith("action"));
   const reminderSheet = workbook.SheetNames.find((n) => normalizeHeader(n).startsWith("reminder"));
+  const repSheet = workbook.SheetNames.find((n) => /^(reps|representatives|marketingreps)/.test(normalizeHeader(n)));
+  const tierSheet = workbook.SheetNames.find((n) => /^(tiers|customertiers|grades)/.test(normalizeHeader(n)));
+  const metaSheet = workbook.SheetNames.find((n) => /^(meta|settings)/.test(normalizeHeader(n)));
 
-  return buildData(
+  const book = buildData(
     rowsOf(customerSheet),
     actionSheet ? rowsOf(actionSheet) : null,
-    reminderSheet ? rowsOf(reminderSheet) : null
+    reminderSheet ? rowsOf(reminderSheet) : null,
+    repSheet ? rowsOf(repSheet) : null,
+    tierSheet ? rowsOf(tierSheet) : null
   );
+  // Only a file the app wrote carries meta; an ordinary spreadsheet has none,
+  // and restoring from one simply leaves the settings alone.
+  return { ...book, meta: metaSheet ? readMeta(rowsOf(metaSheet)) : null };
 }
 
 /**
@@ -366,18 +534,36 @@ export async function loadSeedData(baseUrl = import.meta.env.BASE_URL) {
   const remindersCsv = await fetchText("data/reminders.csv", false);
   const reminders = remindersCsv ? normalizeReminders(parseCsv(remindersCsv), customers) : [];
 
-  return { customers: applyActions(customers, actions), actions, reminders };
+  const repsCsv = await fetchText("data/reps.csv", false);
+  const reps = reconcileReps(repsCsv ? normalizeReps(parseCsv(repsCsv)) : [], customers);
+
+  const tiersCsv = await fetchText("data/tiers.csv", false);
+  const tiers = reconcileTiers(tiersCsv ? normalizeTiers(parseCsv(tiersCsv)) : [], customers);
+
+  return {
+    customers: applyTiers(applyReps(applyActions(customers, actions), reps), tiers),
+    actions,
+    reminders,
+    reps,
+    tiers,
+  };
 }
 
 /* ---------------- Export ---------------- */
 
 export function customerAoA(customers) {
   return [
-    ["customer_id", "name", "phone", "initials", "visit_every_weeks", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
+    ["customer_id", "name", "phone", "company", "marketing_rep_id", "marketing_rep", "tier_id", "tier", "initials", "visit_every_weeks", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
     ...customers.map((c) => [
       c.id,
       c.name,
       c.phone || "",
+      c.company || "",
+      c.repId || "",
+      // The name rides along for a human reading the sheet; the id is the join.
+      c.repName || "",
+      c.tierId || "",
+      c.tierName || "",
       c.initials || "",
       c.visitEveryWeeks || "",
       c.contact?.on || "",
@@ -399,27 +585,164 @@ export function reminderAoA(reminders, customers) {
   // The name rides along for a human reading the sheet; the id is the join.
   const nameOf = (id) => customers.find((c) => c.id === id)?.name || "";
   return [
-    ["reminder_id", "customer_id", "customer_name", "due_date", "note"],
-    ...reminders.map((r) => [r.id, r.customerId, nameOf(r.customerId), r.dueOn, r.note || ""]),
+    ["reminder_id", "customer_id", "customer_name", "due_date", "note", "is_done"],
+    ...reminders.map((r) => [r.id, r.customerId, nameOf(r.customerId), r.dueOn, r.note || "", r.isDone ? 1 : 0]),
   ];
 }
 
-/** Downloads the current data as a three-sheet .xlsx — the backup / hand-off file. */
-export async function downloadWorkbook(customers, actions, reminders, filename) {
+export function repAoA(reps) {
+  return [
+    ["rep_id", "name", "is_active"],
+    ...(reps || []).map((r) => [r.id, r.name, r.isActive ? 1 : 0]),
+  ];
+}
+
+export function tierAoA(tiers) {
+  return [
+    ["tier_id", "name", "rank", "is_active"],
+    ...(tiers || []).map((t) => [t.id, t.name, t.rank ?? "", t.isActive ? 1 : 0]),
+  ];
+}
+
+/**
+ * Everything the app holds, as one `.xlsx` — the backup file.
+ *
+ * Settings ride along in their own tab so a restore puts the app back exactly
+ * as it was, not merely with the same customers in it. The tab is key/value
+ * rather than columns per setting, so adding a setting later does not change
+ * the shape of a file already taken.
+ */
+/** Bumped only if the shape changes in a way a restore has to know about. */
+export const BACKUP_FORMAT = "visit-tracker-backup-1";
+
+export function metaAoA(settings, { takenAt = new Date() } = {}) {
+  return [
+    ["key", "value"],
+    ["format", BACKUP_FORMAT],
+    ["taken_at", takenAt.toISOString()],
+    ["default_interval_weeks", settings?.defaultIntervalWeeks ?? ""],
+  ];
+}
+
+const META_FIELDS = { key: ["key", "setting", "name"], value: ["value", "val"] };
+
+/** Reads the meta tab back. Unknown keys are ignored, missing ones left alone. */
+export function readMeta(rows) {
+  const out = {};
+  for (const row of rows || []) {
+    const f = pick(row, META_FIELDS);
+    const key = text(f.key).toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!key) continue;
+    out[key] = text(f.value);
+  }
+  const weeks = parseWeeks(out.defaultintervalweeks);
+  return {
+    format: out.format || null,
+    takenAt: out.takenat || null,
+    settings: weeks === null ? null : { defaultIntervalWeeks: weeks },
+  };
+}
+
+/** Downloads the current data as a five-sheet .xlsx plus settings — the backup file. */
+export async function downloadWorkbook(customers, actions, reminders, reps, tiers, settings, filename) {
   const XLSX = await loadXlsx();
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(customerAoA(customers)), "customers");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(actionAoA(actions)), "actions");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(reminderAoA(reminders, customers)), "reminders");
-  XLSX.writeFile(wb, filename || `visit-tracker-${todayIso()}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(repAoA(reps)), "reps");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(tierAoA(tiers)), "tiers");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(metaAoA(settings)), "meta");
+  XLSX.writeFile(wb, filename || backupFilename());
 }
 
-/** Downloads the three tables as separate CSVs, matching the sheet tabs. */
-export function downloadCsvs(customers, actions, reminders) {
+/**
+ * The blank sheet for adding customers in bulk.
+ *
+ * Carries a second tab explaining each column and listing the rep and tier
+ * names already in use — typed from memory those drift ("Priya"/"Priya Shah"),
+ * and a name that nearly matches creates a second rep rather than finding the
+ * first.
+ */
+export async function downloadCustomerTemplate(reps = [], tiers = [], filename) {
+  triggerDownload(
+    await buildCustomerTemplate(reps, tiers),
+    filename || `customer-template-${todayIso()}.xlsx`,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+}
+
+/** The template as bytes — split out from the download so it can be tested. */
+export async function buildCustomerTemplate(reps = [], tiers = []) {
+  const XLSX = await loadXlsx();
+  const wb = XLSX.utils.book_new();
+
+  // Only values the app can actually resolve are offered. A removed rep is not
+  // a choice, and offering one would invite assignments the app then drops.
+  const repNames = (reps || []).filter((r) => r.isActive).map((r) => r.name);
+  const tierNames = sortList((tiers || []).filter((t) => t.isActive)).map((t) => t.name);
+
+  const sheet = XLSX.utils.aoa_to_sheet([TEMPLATE_COLUMNS.map((c) => c.header)]);
+  // Wide enough to read the headings without dragging every column out.
+  sheet["!cols"] = TEMPLATE_COLUMNS.map((c) => ({ wch: Math.max(16, c.header.length + 4) }));
+  XLSX.utils.book_append_sheet(wb, sheet, "customers");
+
+  const notes = [
+    ["Adding customers in bulk"],
+    [""],
+    ["Fill in one row per customer on the 'customers' tab, then import it with"],
+    ["Settings → Add customers from a file."],
+    [""],
+    ["A customer already on your list is matched by name and has these fields"],
+    ["updated. A blank cell leaves what you already have alone — it never"],
+    ["clears it. Visits, reminders and calls are never touched."],
+    [""],
+    ["marketing_rep, tier and visit_every_weeks are dropdowns, limited to what"],
+    ["already exists in the app. To use a new rep or tier, add it in the app"],
+    ["first and download the template again."],
+    [""],
+    ["Column", "What it is"],
+    ...TEMPLATE_COLUMNS.map((c) => [c.header, c.note]),
+  ];
+  const notesSheet = XLSX.utils.aoa_to_sheet(notes);
+  notesSheet["!cols"] = [{ wch: 22 }, { wch: 78 }];
+  XLSX.utils.book_append_sheet(wb, notesSheet, "how to fill this in");
+
+  // The values the dropdowns point at. A sheet rather than an inline list:
+  // inline lists are capped at 255 characters, which a dozen names can pass.
+  const depth = Math.max(repNames.length, tierNames.length);
+  const listRows = [["marketing_rep", "tier"]];
+  for (let i = 0; i < depth; i++) listRows.push([repNames[i] || "", tierNames[i] || ""]);
+  const listSheet = XLSX.utils.aoa_to_sheet(listRows);
+  listSheet["!cols"] = [{ wch: 28 }, { wch: 28 }];
+  XLSX.utils.book_append_sheet(wb, listSheet, "lists");
+
+  // Written uncompressed so the worksheet part can be reopened and the
+  // dropdowns added — the library cannot write them itself.
+  const bytes = XLSX.write(wb, { type: "array", bookType: "xlsx", compression: false });
+  return addValidations(new Uint8Array(bytes), {
+    rules: templateRules({
+      columns: TEMPLATE_COLUMNS,
+      reps: repNames,
+      tiers: tierNames,
+      minWeeks: MIN_WEEKS,
+      maxWeeks: MAX_WEEKS,
+    }),
+  });
+}
+
+/** `visit-tracker-backup-2026-10-29.xlsx` — sorts by date in a folder listing. */
+export const backupFilename = (ext = "xlsx", now = new Date()) =>
+  `visit-tracker-backup-${todayIso(now)}.${ext}`;
+
+/** Downloads the five tables as separate CSVs, matching the sheet tabs. */
+export function downloadCsvs(customers, actions, reminders, reps, tiers) {
   const stamp = todayIso();
   triggerDownload(toCsv(customerAoA(customers)), `customers-${stamp}.csv`, "text/csv;charset=utf-8");
   triggerDownload(toCsv(actionAoA(actions)), `actions-${stamp}.csv`, "text/csv;charset=utf-8");
   triggerDownload(toCsv(reminderAoA(reminders, customers)), `reminders-${stamp}.csv`, "text/csv;charset=utf-8");
+  triggerDownload(toCsv(repAoA(reps)), `reps-${stamp}.csv`, "text/csv;charset=utf-8");
+  triggerDownload(toCsv(tierAoA(tiers)), `tiers-${stamp}.csv`, "text/csv;charset=utf-8");
 }
 
 function triggerDownload(text, filename, mime) {

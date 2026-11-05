@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { AlertCircle, Check, Cloud, CloudOff, RefreshCw, Upload } from "lucide-react";
 import { T, tint } from "../theme.js";
-import { isConfigured, ping } from "../lib/sheets.js";
+import { REQUIRED_SCRIPT_VERSION, isConfigured, ping } from "../lib/sheets.js";
 
 /**
  * Connects the app to its Google Sheet.
@@ -18,10 +18,11 @@ export default function SheetConnection({ config, onSave, sync, outboxCount, onR
   const [uploading, setUploading] = useState(null);
 
   const upload = async () => {
-    const total = counts.customers + counts.actions + counts.reminders;
+    const total = counts.customers + counts.actions + counts.reminders + counts.reps;
     if (!window.confirm(
-      `Upload this device's ${counts.customers} customers, ${counts.actions} visits and ` +
-        `${counts.reminders} reminders to the sheet?\n\nAnything already in those three tabs is replaced.`
+      `Upload this device's ${counts.customers} customers, ${counts.actions} visits, ` +
+        `${counts.reminders} reminders and ${counts.reps} representatives to the sheet?` +
+        "\n\nAnything already in those four tabs is replaced."
     )) return;
     setResult(null);
     setUploading({ done: 0, total });
@@ -59,10 +60,18 @@ export default function SheetConnection({ config, onSave, sync, outboxCount, onR
       const info = await ping(candidate);
       // Surfacing the version makes the "I pasted the code but nothing changed"
       // case obvious: an old number means the deployment was never republished.
-      setResult({
-        ok: true,
-        message: `Connected. Script version ${info?.version ?? "1 (old — republish as a New version)"}.`,
-      });
+      const version = Number(info?.version) || 1;
+      setResult(
+        version < REQUIRED_SCRIPT_VERSION
+          ? {
+              ok: false,
+              message:
+                `Connected, but the script is version ${version} and this app needs ${REQUIRED_SCRIPT_VERSION}. ` +
+                "Company names, marketing reps and completed reminders will not reach the sheet until you paste " +
+                "the latest google-apps-script/Code.gs in and redeploy as a New version.",
+            }
+          : { ok: true, message: `Connected. Script version ${version}.` }
+      );
       return true;
     } catch (err) {
       setResult({ ok: false, message: err.message });
@@ -182,8 +191,25 @@ export default function SheetConnection({ config, onSave, sync, outboxCount, onR
         </div>
       )}
 
+      {sync.scriptOutdated && (
+        <div style={{ marginTop: 10, background: tint(T.amber, 0.12), border: `1px solid ${tint(T.amber, 0.3)}`, borderRadius: 12, padding: 12, display: "flex", gap: 9, alignItems: "flex-start" }}>
+          <AlertCircle size={15} color={T.amber} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11.5, color: T.text, lineHeight: 1.5 }}>
+            This sheet has no <b>reps</b> tab, so its script is older than this app. Company names, marketing reps and
+            completed reminders are <b>not</b> being saved to it. Paste the latest{" "}
+            <code style={{ color: T.gold }}>google-apps-script/Code.gs</code> into Extensions → Apps Script, then
+            Deploy → Manage deployments → ✏ → New version → Deploy.
+          </span>
+        </div>
+      )}
+
       {connected && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.border}`, fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: T.textDim, lineHeight: 1.6 }}>
+          <span style={{ display: "block", marginBottom: 4 }}>
+            {sync.seeded
+              ? "This sheet is the source of truth — changes go both ways."
+              : "Not syncing yet: upload first, or the sheet needs data in it."}
+          </span>
           {outboxCount > 0 ? (
             <span style={{ color: T.amber }}>
               {outboxCount} {outboxCount === 1 ? "change" : "changes"} waiting to go up — they will send on the next sync.
@@ -195,6 +221,11 @@ export default function SheetConnection({ config, onSave, sync, outboxCount, onR
             <span style={{ display: "block", color: T.red, marginTop: 4 }}>Last sync failed: {sync.error}</span>
           )}
           {sync.state === "syncing" && <span style={{ display: "block", marginTop: 4 }}>Syncing…</span>}
+          {sync.at && sync.state === "idle" && (
+            <span style={{ display: "block", marginTop: 4 }}>
+              Last synced {new Date(sync.at).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
         </div>
       )}
     </div>

@@ -2,12 +2,18 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, BarChart3, Plus, PhoneCall, Settings, Users } from "lucide-react";
 import { T, tint } from "./theme.js";
 import { initialsFor } from "./lib/analytics.js";
-import { isoDaysAgo, isoDaysFromNow, todayIso } from "./lib/dates.js";
+import { isoDaysFromNow, todayIso } from "./lib/dates.js";
 import * as storage from "./lib/storage.js";
 import { clearPin, loadPin, savePin } from "./lib/pin.js";
 import { clampWeeks, loadSettings, saveSettings } from "./lib/settings.js";
 import { currentWeekIndex } from "./lib/weeks.js";
-import { actionAoA, applyActions, customerAoA, loadSeedData, nextCustomerId, reminderAoA } from "./lib/dataSource.js";
+import { useLayout } from "./lib/layout.js";
+import { actionAoA, applyActions, customerAoA, loadSeedData, nextCustomerId, reminderAoA, repAoA, tierAoA } from "./lib/dataSource.js";
+import { applyReps, repById } from "./lib/reps.js";
+import { applyTiers, moveTier, reRankTiers, tierById } from "./lib/tiers.js";
+// The generic names, because `useListActions` serves both lists — calling a
+// rep comparison `tierKey` would read as a bug to the next person.
+import { listKey, nextListId } from "./lib/lookups.js";
 import { hasVisit } from "./lib/visits.js";
 import { changeFor, isConfigured, isSeeded, loadSheetConfig, markSeeded, readAll, replaceTab, saveSheetConfig } from "./lib/sheets.js";
 import { enqueue, flush, fromSheet, loadOutbox, saveOutbox, syncNow } from "./lib/sync.js";
@@ -18,9 +24,10 @@ import FollowUps from "./screens/FollowUps.jsx";
 import CustomersScreen from "./screens/CustomersScreen.jsx";
 import CustomerDetail from "./screens/CustomerDetail.jsx";
 import AddCustomer from "./screens/AddCustomer.jsx";
+import EditCustomer from "./screens/EditCustomer.jsx";
 import DataScreen from "./screens/DataScreen.jsx";
 import Reports from "./screens/Reports.jsx";
-import { AddReminderSheet, LogVisitSheet } from "./components/sheets.jsx";
+import { AddReminderSheet, EditReminderSheet, LogVisitSheet } from "./components/sheets.jsx";
 import { CalledSheet, SnoozeSheet } from "./components/followUpSheets.jsx";
 import ChangePinSheet from "./components/ChangePinSheet.jsx";
 import UndoToast from "./components/UndoToast.jsx";
@@ -42,6 +49,7 @@ const OWNER_TABS = [
 ];
 
 export default function App() {
+  const layout = useLayout();
   const [status, setStatus] = useState("loading"); // loading | ready | error
   const [loadError, setLoadError] = useState(null);
   // `people` holds everything about a customer except their visits; `actions`
@@ -50,8 +58,18 @@ export default function App() {
   const [people, setPeople] = useState([]);
   const [actions, setActions] = useState([]);
   const [reminders, setReminders] = useState([]);
+  // The marketing representatives the owner maintains. A customer stores the
+  // rep's id; the name is resolved from here so renaming one renames it
+  // everywhere rather than leaving stale copies on sixty customer rows.
+  const [reps, setReps] = useState([]);
+  // How important each customer is. Ordered by the owner; the app only reads
+  // the order, and only ever to break a tie on the call list.
+  const [tiers, setTiers] = useState([]);
   const [source, setSource] = useState(null);
-  const customers = useMemo(() => applyActions(people, actions), [people, actions]);
+  const customers = useMemo(
+    () => applyTiers(applyReps(applyActions(people, actions), reps), tiers),
+    [people, actions, reps, tiers]
+  );
   // Read inside callbacks that must not re-create on every edit.
   const peopleRef = useRef(people);
   peopleRef.current = people;
@@ -59,7 +77,7 @@ export default function App() {
   // Google Sheet connection, plus the queue of changes it has not been told about.
   const [sheetConfig, setSheetConfig] = useState(loadSheetConfig);
   const [outbox, setOutbox] = useState(loadOutbox);
-  const [sync, setSync] = useState({ state: "idle", at: null, error: null });
+  const [sync, setSync] = useState({ state: "idle", at: null, error: null, seeded: false });
   const outboxRef = useRef(outbox);
   outboxRef.current = outbox;
 
@@ -76,6 +94,8 @@ export default function App() {
   const [calledSheetFor, setCalledSheetFor] = useState(null);
   const [snoozeSheetFor, setSnoozeSheetFor] = useState(null);
   const [reminderSheetOpen, setReminderSheetOpen] = useState(false);
+  const [editReminderFor, setEditReminderFor] = useState(null);
+  const [editingCustomer, setEditingCustomer] = useState(false);
   const [changePinOpen, setChangePinOpen] = useState(false);
 
   // The PIN in force on this device: one set in the app wins over the build's.
@@ -119,13 +139,15 @@ export default function App() {
     setPeople(data.customers.map(({ visits, ...rest }) => rest));
     setActions(data.actions);
     setReminders(data.reminders);
+    setReps(data.reps || []);
+    setTiers(data.tiers || []);
   }, []);
 
   const applySeed = useCallback(async () => {
     const data = await loadSeedData();
     adopt(data);
     setSource({ kind: "seed", label: "customers.csv", at: todayIso() });
-    storage.save(data.customers, data.actions, data.reminders);
+    storage.save(data.customers, data.actions, data.reminders, data.reps, data.tiers);
     return data;
   }, [adopt]);
 
@@ -160,8 +182,14 @@ export default function App() {
           adopt(data);
           markSeeded(sheetConfig);
           setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
-          storage.save(data.customers, data.actions, data.reminders);
-          setSync({ state: "idle", at: new Date().toISOString(), error: null });
+          storage.save(data.customers, data.actions, data.reminders, data.reps, data.tiers);
+          setSync({
+            state: "idle",
+            at: new Date().toISOString(),
+            error: null,
+            seeded: true,
+            scriptOutdated: !data.hasRepsTab || !data.hasTiersTab,
+          });
           return;
         }
 
@@ -170,8 +198,14 @@ export default function App() {
         setOutbox(data.outbox);
         saveOutbox(data.outbox);
         setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
-        storage.save(data.customers, data.actions, data.reminders);
-        setSync({ state: "idle", at: new Date().toISOString(), error: null });
+        storage.save(data.customers, data.actions, data.reminders, data.reps, data.tiers);
+        setSync({
+          state: "idle",
+          at: new Date().toISOString(),
+          error: null,
+          seeded: true,
+          scriptOutdated: !data.hasRepsTab || !data.hasTiersTab,
+        });
       } catch (err) {
         setSync((s0) => ({ ...s0, state: "error", error: err.message }));
       }
@@ -222,7 +256,6 @@ export default function App() {
           return;
         }
       }
-      if (!cancelled) refresh({ quiet: true });
     })();
     return () => {
       cancelled = true;
@@ -230,6 +263,17 @@ export default function App() {
     // Deliberately once on mount; later refreshes are driven by focus.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Sync whenever the connected sheet changes — including the moment one is
+   * first saved. Without this, connecting a sheet did nothing until the app
+   * happened to lose focus: no read, so it never became the source of truth,
+   * so the outbox stayed gated and writes never left the device.
+   */
+  useEffect(() => {
+    if (!isConfigured(sheetConfig)) return;
+    refresh({ quiet: true });
+  }, [sheetConfig.url, sheetConfig.secret, refresh]);
 
   // "Latest data every time the user views the UI" — re-read on return.
   useEffect(() => {
@@ -259,8 +303,8 @@ export default function App() {
   // Every change is written straight through, so a reload never loses a visit
   // even before the sheet has been told about it.
   useEffect(() => {
-    if (status === "ready") storage.save(customers, actions, reminders);
-  }, [customers, actions, reminders, status]);
+    if (status === "ready") storage.save(customers, actions, reminders, reps, tiers);
+  }, [customers, actions, reminders, reps, tiers, status]);
 
   /* ---- mutations: apply locally, queue for the sheet ---- */
 
@@ -279,8 +323,12 @@ export default function App() {
     [queue]
   );
 
-  const logVisit = (id, daysAgo) => {
-    const date = isoDaysAgo(daysAgo);
+  /**
+   * Records a visit on a given day. Takes the date itself rather than a count
+   * of days ago: the staff screen asks "when did they come in?", and nobody
+   * holds the answer to that as a number.
+   */
+  const logVisit = (id, date = todayIso()) => {
     const customer = customers.find((c) => c.id === id);
     if (!customer) return;
 
@@ -347,28 +395,63 @@ export default function App() {
 
   const unsnooze = (id) => patchPerson(id, { snoozedUntilWeek: null, snoozedUntil: null });
 
+  const nameOfCustomer = useCallback(
+    (customerId) => peopleRef.current.find((c) => c.id === customerId)?.name || "",
+    []
+  );
+
   const addReminder = (customerId, dueInDays, note) => {
     const reminder = { id: uid("rem"), customerId, dueOn: isoDaysFromNow(dueInDays), note, isDone: false };
     setReminders((rs) => [...rs, reminder]);
-    queue([changeFor.reminder(reminder, customers.find((c) => c.id === customerId)?.name)]);
+    queue([changeFor.reminder(reminder, nameOfCustomer(customerId))]);
   };
 
-  const dismissReminder = (id) => {
+  /** Edits a reminder and sends the whole row up, the way `patchPerson` does. */
+  const patchReminder = useCallback(
+    (id, patch) => {
+      setReminders((rs) =>
+        rs.map((reminder) => {
+          if (reminder.id !== id) return reminder;
+          const next = { ...reminder, ...patch };
+          queue([changeFor.reminder(next, nameOfCustomer(next.customerId))]);
+          return next;
+        })
+      );
+    },
+    [queue, nameOfCustomer]
+  );
+
+  const updateReminder = (id, { dueOn, note }) => patchReminder(id, { dueOn, note });
+
+  /**
+   * Ticking one off marks it done rather than removing it — the Reminders
+   * screen keeps the history of what was followed up and when, and it can be
+   * put back if it was ticked by mistake.
+   */
+  const dismissReminder = (id) => patchReminder(id, { isDone: true });
+  const restoreReminder = (id) => patchReminder(id, { isDone: false });
+
+  /**
+   * For a reminder that should never have been set. The sheet keeps the row;
+   * blanking the due date is what marks it gone, since a reminder with no date
+   * is dropped on the next read.
+   */
+  const deleteReminder = (id) => {
     const reminder = reminders.find((r) => r.id === id);
     setReminders((rs) => rs.filter((r) => r.id !== id));
-    // Marked done in the sheet rather than deleted, so the row survives.
-    if (reminder) {
-      queue([
-        changeFor.reminder({ ...reminder, isDone: true }, customers.find((c) => c.id === reminder.customerId)?.name),
-      ]);
-    }
+    if (reminder) queue([changeFor.reminder({ ...reminder, dueOn: "" }, nameOfCustomer(reminder.customerId))]);
   };
 
-  const addCustomer = ({ name, phone, visitEveryWeeks, visitedToday }) => {
+  const addCustomer = ({ name, phone, company, repId, tierId, visitEveryWeeks, visitedToday }) => {
     const person = {
       id: nextCustomerId(people),
       name,
       phone,
+      company: company || "",
+      repId: repId || null,
+      repName: repById(reps, repId)?.name || "",
+      tierId: tierId || null,
+      tierName: tierById(tiers, tierId)?.name || "",
       initials: initialsFor(name),
       visitEveryWeeks: visitEveryWeeks ?? null,
       contact: null,
@@ -385,7 +468,133 @@ export default function App() {
     queue(changes);
   };
 
-  const updateCustomer = (id, patch) => patchPerson(id, patch);
+  /**
+   * Owner-side profile edit. A changed name re-derives the initials unless the
+   * owner has set their own, and a changed rep carries the name along so the
+   * sheet row stays readable to a human.
+   */
+  const updateCustomer = (id, patch) => {
+    const next = { ...patch };
+    if (next.repId !== undefined) next.repName = repById(reps, next.repId)?.name || "";
+    if (next.tierId !== undefined) next.tierName = tierById(tiers, next.tierId)?.name || "";
+    if (next.name !== undefined && next.initials === undefined) {
+      const person = peopleRef.current.find((c) => c.id === id);
+      // Only follow the name if the initials were never set by hand.
+      if (person && person.initials === initialsFor(person.name)) next.initials = initialsFor(next.name);
+    }
+    patchPerson(id, next);
+  };
+
+  /**
+   * Applies a bulk import that the owner has already seen and confirmed.
+   *
+   * Order matters: any rep or tier the file introduces has to exist before a
+   * customer can point at it, so the lists are built first and everything else
+   * is resolved against the result. All of it lands in one pass so the screen
+   * updates once rather than flickering through sixty intermediate states.
+   */
+  const applyCustomerImport = useCallback(
+    (plan) => {
+      const changes = [];
+
+      // 1. New reps and tiers, appended to the lists as they stand.
+      let nextReps = [...reps];
+      for (const name of plan.newReps) {
+        const rep = { id: nextListId(nextReps), name, isActive: true };
+        nextReps.push(rep);
+        changes.push(changeFor.rep(rep));
+      }
+      let nextTiers = [...tiers];
+      for (const name of plan.newTiers) {
+        // A tier the file invented goes last in the order: the owner ranks
+        // their tiers deliberately, and a spreadsheet does not get a say.
+        const tier = { id: nextListId(nextTiers), name, isActive: true, rank: nextTiers.length + 1 };
+        nextTiers.push(tier);
+        changes.push(changeFor.tier(tier));
+      }
+      nextTiers = reRankTiers(nextTiers);
+
+      const repIdFor = (name) => nextReps.find((r) => listKey(r.name) === listKey(name)) || null;
+      const tierIdFor = (name) => nextTiers.find((t) => listKey(t.name) === listKey(name)) || null;
+
+      // 2. The customers themselves, added and patched in one pass.
+      setPeople((prev) => {
+        const updates = new Map(plan.updates.map((u) => [u.id, u]));
+        let next = prev.map((person) => {
+          const update = updates.get(person.id);
+          if (!update) return person;
+          const patch = { ...update.patch };
+          if ("repName" in patch) {
+            const rep = repIdFor(patch.repName);
+            patch.repId = rep ? rep.id : null;
+            patch.repName = rep ? rep.name : "";
+          }
+          if ("tierName" in patch) {
+            const tier = tierIdFor(patch.tierName);
+            patch.tierId = tier ? tier.id : null;
+            patch.tierName = tier ? tier.name : "";
+          }
+          const merged = { ...person, ...patch };
+          changes.push(changeFor.customer(merged));
+          return merged;
+        });
+
+        for (const row of plan.adds) {
+          const rep = repIdFor(row.repName);
+          const tier = tierIdFor(row.tierName);
+          const person = {
+            // Ids come off the growing list, so a batch cannot collide inside itself.
+            id: nextCustomerId(next),
+            name: row.name,
+            phone: row.phone || "",
+            company: row.company || "",
+            repId: rep ? rep.id : null,
+            repName: rep ? rep.name : "",
+            tierId: tier ? tier.id : null,
+            tierName: tier ? tier.name : "",
+            initials: initialsFor(row.name),
+            visitEveryWeeks: row.visitEveryWeeks ?? null,
+            contact: null,
+            snoozedUntilWeek: null,
+          };
+          next = [...next, person];
+          changes.push(changeFor.customer(person));
+        }
+        return next;
+      });
+
+      setReps(nextReps);
+      setTiers(nextTiers);
+      queue(changes);
+      return { added: plan.adds.length, updated: plan.updates.length };
+    },
+    [reps, tiers, queue]
+  );
+
+  /* ---- the owner's short lists: representatives and tiers ---- */
+
+  const repActions = useListActions({
+    entries: reps,
+    setEntries: setReps,
+    keys: { idKey: "repId", nameKey: "repName" },
+    changeOf: changeFor.rep,
+    noun: "representative",
+    queue,
+    setPeople,
+    peopleRef,
+  });
+
+  const tierActions = useListActions({
+    entries: tiers,
+    setEntries: setTiers,
+    keys: { idKey: "tierId", nameKey: "tierName" },
+    changeOf: changeFor.tier,
+    noun: "tier",
+    ranked: true,
+    queue,
+    setPeople,
+    peopleRef,
+  });
 
   const deleteCustomer = (id) => {
     setPeople((ps) => ps.filter((c) => c.id !== id));
@@ -395,12 +604,25 @@ export default function App() {
     if (person) queue([changeFor.customer({ ...person, name: "" })]);
   };
 
+  /**
+   * Swaps the whole book for one read out of a file. Also the restore path:
+   * a backup carries its settings in a `meta` tab, and putting those back is
+   * what makes it a restore rather than an import.
+   */
   const replaceData = (data, src) => {
     const stamped = { ...src, at: todayIso() };
-    adopt({ customers: data.customers, actions: data.actions || [], reminders: data.reminders });
+    adopt({
+      customers: data.customers,
+      actions: data.actions || [],
+      reminders: data.reminders,
+      reps: data.reps || [],
+      tiers: data.tiers || [],
+    });
+    if (data.meta?.settings) updateSettings(data.meta.settings);
     setSource(stamped);
     storage.saveSource(stamped);
     setDetailOpen(false);
+    setEditingCustomer(false);
     setActiveCustomerId(null);
   };
 
@@ -421,19 +643,22 @@ export default function App() {
       await replaceTab(sheetConfig, "customers", customerAoA(customers), onProgress);
       await replaceTab(sheetConfig, "actions", actionAoA(actions), onProgress);
       await replaceTab(sheetConfig, "reminders", reminderAoA(reminders, customers), onProgress);
+      await replaceTab(sheetConfig, "reps", repAoA(reps), onProgress);
+      await replaceTab(sheetConfig, "tiers", tierAoA(tiers), onProgress);
       // Everything is now up there, so anything queued is redundant.
       setOutbox([]);
       saveOutbox([]);
       markSeeded(sheetConfig); // the sheet is now authoritative
-      setSync({ state: "idle", at: new Date().toISOString(), error: null });
+      setSync({ state: "idle", at: new Date().toISOString(), error: null, seeded: true });
       setSource({ kind: "sheet", label: "Google Sheet", at: todayIso() });
     },
-    [sheetConfig, customers, actions, reminders]
+    [sheetConfig, customers, actions, reminders, reps, tiers]
   );
 
   const openCustomer = (c) => {
     setActiveCustomerId(c.id);
     setDetailOpen(true);
+    setEditingCustomer(false); // never open straight into the edit form
   };
 
   const activeCustomer = customers.find((c) => c.id === activeCustomerId);
@@ -442,7 +667,7 @@ export default function App() {
 
   if (status !== "ready") {
     return (
-      <Shell>
+      <Shell layout={layout}>
         <div style={{ padding: "80px 24px", textAlign: "center", fontFamily: "'DM Sans', sans-serif", color: T.textDim, fontSize: 14, lineHeight: 1.6 }}>
           {status === "loading" ? (
             "Loading customer list…"
@@ -461,7 +686,7 @@ export default function App() {
   }
 
   return (
-    <Shell>
+    <Shell layout={layout}>
       <div style={{ height: "100%", overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
         {mode === "staff" && (
           <StaffHome
@@ -485,7 +710,7 @@ export default function App() {
           />
         )}
 
-        {mode === "owner" && detailOpen && activeCustomer && (
+        {mode === "owner" && detailOpen && activeCustomer && !editingCustomer && (
           <CustomerDetail
             customer={activeCustomer}
             settings={settings}
@@ -493,6 +718,22 @@ export default function App() {
             openCalled={setCalledSheetFor}
             deleteCustomer={deleteCustomer}
             updateCustomer={updateCustomer}
+            openEdit={() => setEditingCustomer(true)}
+          />
+        )}
+
+        {mode === "owner" && detailOpen && activeCustomer && editingCustomer && (
+          <EditCustomer
+            customer={activeCustomer}
+            reps={reps}
+            tiers={tiers}
+            settings={settings}
+            existingNames={customers.filter((c) => c.id !== activeCustomer.id).map((c) => c.name)}
+            back={() => setEditingCustomer(false)}
+            save={(patch) => {
+              updateCustomer(activeCustomer.id, patch);
+              setEditingCustomer(false);
+            }}
           />
         )}
 
@@ -504,18 +745,33 @@ export default function App() {
                 customers={customers}
                 reminders={reminders}
                 settings={settings}
+                tiers={tiers}
                 openCustomer={openCustomer}
                 dismissReminder={dismissReminder}
+                restoreReminder={restoreReminder}
+                deleteReminder={deleteReminder}
+                openEditReminder={setEditReminderFor}
                 openAddReminder={() => setReminderSheetOpen(true)}
                 openCalled={setCalledSheetFor}
                 openSnooze={setSnoozeSheetFor}
                 unsnooze={unsnooze}
               />
             )}
-            {ownerTab === "customers" && <CustomersScreen customers={customers} settings={settings} openCustomer={openCustomer} />}
+            {ownerTab === "customers" && (
+              <CustomersScreen
+                customers={customers}
+                reps={reps}
+                tiers={tiers}
+                reminders={reminders}
+                settings={settings}
+                openCustomer={openCustomer}
+              />
+            )}
             {ownerTab === "add" && (
               <AddCustomer
                 addCustomer={addCustomer}
+                reps={reps}
+                tiers={tiers}
                 existingNames={customers.map((c) => c.name)}
                 defaultCadence={settings.defaultIntervalWeeks}
               />
@@ -528,6 +784,12 @@ export default function App() {
                 customers={customers}
                 actions={actions}
                 reminders={reminders}
+                reps={reps}
+                repActions={repActions}
+                tiers={tiers}
+                tierActions={tierActions}
+                customersForImport={people}
+                applyCustomerImport={applyCustomerImport}
                 replaceData={replaceData}
                 reloadSeed={reloadSeed}
                 source={source}
@@ -545,7 +807,13 @@ export default function App() {
                 outboxCount={outbox.length}
                 onRefresh={() => refresh()}
                 onUpload={uploadEverything}
-                counts={{ customers: customers.length, actions: actions.length, reminders: reminders.length }}
+                counts={{
+                  customers: customers.length,
+                  actions: actions.length,
+                  reminders: reminders.length,
+                  reps: reps.length,
+                  tiers: tiers.length,
+                }}
               />
             )}
           </>
@@ -561,6 +829,14 @@ export default function App() {
       )}
       {reminderSheetOpen && (
         <AddReminderSheet customers={customers} close={() => setReminderSheetOpen(false)} addReminder={addReminder} />
+      )}
+      {editReminderFor && (
+        <EditReminderSheet
+          reminder={editReminderFor}
+          customer={customers.find((c) => c.id === editReminderFor.customerId)}
+          close={() => setEditReminderFor(null)}
+          save={(patch) => updateReminder(editReminderFor.id, patch)}
+        />
       )}
       {changePinOpen && (
         <ChangePinSheet close={() => setChangePinOpen(false)} currentPin={ownerPin} changePin={changePin} />
@@ -578,18 +854,139 @@ export default function App() {
   );
 }
 
+
 /**
- * Fills the phone screen on a device; on a desktop browser it settles into a
- * centred phone-sized column so the layout stays honest at any window size.
+ * Add / rename / remove / reassign for one of the owner's short lists.
+ *
+ * Representatives and tiers are the same kind of thing — a handful of named
+ * entries that customers point at by id — so they get the same behaviours from
+ * one place rather than two near-identical copies that drift apart. Tiers add
+ * ordering on top; `ranked` is the only difference between the two callers.
  */
-function Shell({ children }) {
+function useListActions({ entries, setEntries, keys, changeOf, noun, ranked = false, queue, setPeople, peopleRef }) {
+  const { idKey, nameKey } = keys;
+  const countOf = (id) => peopleRef.current.filter((c) => c[idKey] === id).length;
+
+  /** Renumbers after any change that alters which entries are active. */
+  const settle = (next) => (ranked ? reRankTiers(next) : next);
+
+  /** Everything whose rank moved has to go up as well, not just the one edited. */
+  const queueAll = (before, after) => {
+    const was = new Map(before.map((e) => [e.id, e]));
+    const changed = after.filter((e) => {
+      const old = was.get(e.id);
+      return !old || old.name !== e.name || old.isActive !== e.isActive || old.rank !== e.rank;
+    });
+    if (changed.length) queue(changed.map(changeOf));
+  };
+
+  /** Returns an error message, or null when it worked. */
+  const add = (name) => {
+    const trimmed = String(name || "").trim();
+    if (!trimmed) return `Give the ${noun} a name.`;
+    if (entries.some((e) => listKey(e.name) === listKey(trimmed) && e.isActive)) {
+      return `${trimmed} is already on the list.`;
+    }
+    // Re-adding something removed brings its old row back rather than making a
+    // second one, so the customers it had stay attached.
+    const retired = entries.find((e) => listKey(e.name) === listKey(trimmed));
+    const entry = retired
+      ? { ...retired, isActive: true }
+      : { id: nextListId(entries), name: trimmed, isActive: true };
+    const next = settle(retired ? entries.map((e) => (e.id === entry.id ? entry : e)) : [...entries, entry]);
+    setEntries(next);
+    queueAll(entries, next);
+    return null;
+  };
+
+  /**
+   * Renaming rewrites the name denormalised onto every customer pointing at
+   * it. The id is the join, so nothing would break without this — but the
+   * sheet would read as the old name, which is the point of keeping it there.
+   */
+  const rename = (id, name) => {
+    const trimmed = String(name || "").trim();
+    if (!trimmed) return `Give the ${noun} a name.`;
+    if (entries.some((e) => e.id !== id && listKey(e.name) === listKey(trimmed) && e.isActive)) {
+      return `${trimmed} is already on the list.`;
+    }
+    const entry = entries.find((e) => e.id === id);
+    if (!entry || entry.name === trimmed) return null;
+
+    const next = entries.map((e) => (e.id === id ? { ...e, name: trimmed } : e));
+    setEntries(next);
+
+    const touched = peopleRef.current.filter((c) => c[idKey] === id);
+    setPeople((ps) => ps.map((c) => (c[idKey] === id ? { ...c, [nameKey]: trimmed } : c)));
+    queue([
+      changeOf({ ...entry, name: trimmed }),
+      ...touched.map((c) => changeFor.customer({ ...c, [nameKey]: trimmed })),
+    ]);
+    return null;
+  };
+
+  /**
+   * Taking something off the list marks it inactive rather than deleting it:
+   * the customers on it keep a readable name, and the reports can still
+   * account for them.
+   */
+  const remove = (id) => {
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) return;
+    const next = settle(entries.map((e) => (e.id === id ? { ...e, isActive: false } : e)));
+    setEntries(next);
+    queueAll(entries, next);
+  };
+
+  /** Moves every customer from one entry to another (or to nobody). */
+  const reassign = (fromId, toId) => {
+    const name = (entries.find((e) => e.id === toId) || {}).name || "";
+    const touched = peopleRef.current.filter((c) => c[idKey] === fromId);
+    if (!touched.length) return 0;
+    const patch = { [idKey]: toId || null, [nameKey]: name };
+    setPeople((ps) => ps.map((c) => (c[idKey] === fromId ? { ...c, ...patch } : c)));
+    queue(touched.map((c) => changeFor.customer({ ...c, ...patch })));
+    return touched.length;
+  };
+
+  /** Ranked lists only: one place up or down the order of importance. */
+  const move = (id, direction) => {
+    if (!ranked) return;
+    const next = moveTier(entries, id, direction);
+    setEntries(next);
+    queueAll(entries, next);
+  };
+
+  return { add, rename, remove, reassign, move, countOf };
+}
+
+/**
+ * The frame everything else sits in.
+ *
+ * Two jobs. It keeps out of the hardware's way: an installed iOS app draws
+ * edge to edge, so without the top inset the header sits underneath the clock
+ * — which is exactly what "doesn't fit right on the home screen" looks like.
+ * The bottom and sides matter too, for the home indicator and, in landscape,
+ * the notch.
+ *
+ * And it grows. On a phone it is the screen; on an iPad or a desktop browser
+ * it opens out to `maxWidth` rather than stranding a phone-sized column in the
+ * middle of the window.
+ */
+function Shell({ layout, children }) {
   return (
     <div
+      // The height is a class, not a style: `100vh` then `100dvh` is a cascade
+      // fallback, and an inline style has only one slot per property.
+      className="app-shell"
       style={{
         width: "100%",
-        maxWidth: 460,
+        maxWidth: layout.maxWidth,
         margin: "0 auto",
-        height: "100dvh",
+        paddingTop: "var(--safe-top)",
+        paddingLeft: "var(--safe-left)",
+        paddingRight: "var(--safe-right)",
+        boxSizing: "border-box",
         background: T.bg,
         position: "relative",
         overflow: "hidden",
@@ -649,10 +1046,17 @@ function OwnerNav({ tab, setTab }) {
         borderTop: `1px solid ${T.border}`,
         display: "flex",
         alignItems: "center",
-        justifyContent: "space-around",
-        padding: "8px 0 calc(8px + env(safe-area-inset-bottom))",
+        justifyContent: "center",
+        // Clears the iOS home indicator, which otherwise sits on top of the
+        // tabs. The background stays full-bleed to the screen edges — it is
+        // meant to — but the tabs themselves keep out of the side insets, which
+        // in landscape are where the notch and the rounded corners are.
+        padding: "8px var(--safe-right) calc(8px + var(--safe-bottom)) var(--safe-left)",
       }}
     >
+      {/* The row is capped rather than spread: five tabs flung to the corners
+          of a 1200px window are further apart than they are usable. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", width: "100%", maxWidth: 460 }}>
       {OWNER_TABS.map(({ key, icon: Icon, label }) => {
         const active = tab === key;
         return (
@@ -682,6 +1086,7 @@ function OwnerNav({ tab, setTab }) {
           </button>
         );
       })}
+      </div>
     </nav>
   );
 }

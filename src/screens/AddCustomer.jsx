@@ -1,13 +1,20 @@
 import React, { useState } from "react";
-import { Check, Phone, UserPlus } from "lucide-react";
+import { Building2, Check, Phone, UserPlus } from "lucide-react";
 import { T } from "../theme.js";
 import { initialsFor } from "../lib/analytics.js";
 import Avatar from "../components/Avatar.jsx";
 import CadencePicker from "../components/CadencePicker.jsx";
+import { screenPadding, useLayout } from "../lib/layout.js";
+import RepPicker from "../components/RepPicker.jsx";
+import TierPicker from "../components/TierPicker.jsx";
 
-export default function AddCustomer({ addCustomer, existingNames, defaultCadence }) {
+export default function AddCustomer({ addCustomer, reps, tiers, existingNames, defaultCadence }) {
+  const layout = useLayout();
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [company, setCompany] = useState("");
+  const [repId, setRepId] = useState(null);
+  const [tierId, setTierId] = useState(null);
   const [visitEveryWeeks, setVisitEveryWeeks] = useState(defaultCadence);
   const [visitedToday, setVisitedToday] = useState(true);
   const [saved, setSaved] = useState(null);
@@ -19,10 +26,13 @@ export default function AddCustomer({ addCustomer, existingNames, defaultCadence
   const submit = (e) => {
     e.preventDefault();
     if (!canSave) return;
-    addCustomer({ name: trimmed, phone: phone.trim(), visitEveryWeeks, visitedToday });
+    addCustomer({ name: trimmed, phone: phone.trim(), company: company.trim(), repId, tierId, visitEveryWeeks, visitedToday });
     setSaved(trimmed);
     setName("");
     setPhone("");
+    setCompany("");
+    // The rep and tier are deliberately kept: new customers are usually added
+    // in a run, and they tend to come from one rep and one grade of shop.
     setVisitEveryWeeks(defaultCadence);
     setVisitedToday(true);
     setTimeout(() => setSaved(null), 2200);
@@ -41,7 +51,7 @@ export default function AddCustomer({ addCustomer, existingNames, defaultCadence
   };
 
   return (
-    <form onSubmit={submit} style={{ padding: "8px 16px 110px", display: "flex", flexDirection: "column", alignItems: "center" }}>
+    <form onSubmit={submit} style={{ ...screenPadding(layout), display: "flex", flexDirection: "column", alignItems: "center" }}>
       <div style={{ fontFamily: "'Roboto Slab', serif", fontWeight: 700, fontSize: 20, color: T.text, marginBottom: 20 }}>New Customer</div>
 
       <Avatar customer={{ initials: trimmed ? initialsFor(trimmed) : "?" }} size={92} ring={trimmed ? T.gold : T.border} />
@@ -66,6 +76,21 @@ export default function AddCustomer({ addCustomer, existingNames, defaultCadence
             autoComplete="off"
           />
         </div>
+
+        <div style={{ position: "relative" }}>
+          <Building2 size={17} color={T.gold} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }} />
+          <input
+            value={company}
+            onChange={(e) => setCompany(e.target.value)}
+            placeholder="Company name (optional)"
+            style={{ ...field, paddingLeft: 40 }}
+            autoComplete="off"
+          />
+        </div>
+
+        <RepPicker reps={reps} value={repId} onChange={setRepId} />
+
+        <TierPicker tiers={tiers} value={tierId} onChange={setTierId} />
 
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "14px 14px 16px" }}>
           <div style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 700, fontSize: 12, color: T.textDim, marginBottom: 4 }}>

@@ -1,9 +1,13 @@
 import React, { useMemo, useState } from "react";
-import { Search, Trash2 } from "lucide-react";
+import { CalendarRange, Trash2 } from "lucide-react";
 import { T, tint } from "../theme.js";
 import { buildVisitLog, DEFAULT_WINDOW_DAYS } from "../lib/visitLog.js";
 import { formatDate } from "../lib/dates.js";
+import { clampRange, earliestVisit, todayOf } from "../lib/visitCounts.js";
 import Avatar from "../components/Avatar.jsx";
+import SearchField from "../components/SearchField.jsx";
+import DateRange from "../components/DateRange.jsx";
+import { cardGrid, screenPadding, useLayout } from "../lib/layout.js";
 
 /**
  * Owner-only history of every visit recorded, so a mis-tap nobody caught on
@@ -11,13 +15,35 @@ import Avatar from "../components/Avatar.jsx";
  * required the PIN — the staff view has no route to it.
  */
 export default function VisitLog({ customers, deleteVisit, openCustomer, embedded = false }) {
+  const layout = useLayout();
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
+  const [dateOpen, setDateOpen] = useState(false);
 
+  // A window outside the records can only produce a misleading empty screen,
+  // so the picker is bounded by the first visit on record and today.
+  const today = todayOf();
+  const floor = useMemo(() => earliestVisit(customers) || today, [customers, today]);
+  const [range, setRange] = useState(() => ({ from: floor, to: today }));
+
+  const active = dateOpen ? range : { from: null, to: null };
   const log = useMemo(
-    () => buildVisitLog(customers, { windowDays: showAll ? null : DEFAULT_WINDOW_DAYS, query }),
-    [customers, showAll, query]
+    () =>
+      buildVisitLog(customers, {
+        windowDays: showAll ? null : DEFAULT_WINDOW_DAYS,
+        query,
+        from: active.from,
+        to: active.to,
+      }),
+    [customers, showAll, query, active.from, active.to]
   );
+
+  const openDates = () => {
+    // Opening the filter should never hide anything before it is touched, so
+    // it starts at the full span of the records.
+    setRange(clampRange({ from: floor, to: today }, { min: floor, max: today }));
+    setDateOpen(true);
+  };
 
   const confirmDelete = (customer, date) => {
     if (window.confirm(`Remove the visit for ${customer.name} on ${formatDate(date)}?\n\nThis cannot be undone.`)) {
@@ -26,45 +52,71 @@ export default function VisitLog({ customers, deleteVisit, openCustomer, embedde
   };
 
   return (
-    <div style={{ padding: embedded ? "0 16px" : "8px 16px 110px" }}>
+    <div style={embedded ? { padding: `0 ${layout.gutter}px` } : screenPadding(layout)}>
       {!embedded && (
         <div style={{ fontFamily: "'Roboto Slab', serif", fontWeight: 700, fontSize: 20, color: T.text, marginBottom: 4 }}>
           Visit log
         </div>
       )}
-      <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: T.textDim, marginBottom: 14 }}>
+      <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: T.textDim, marginBottom: 12 }}>
         Every visit recorded, newest first. Deleting one removes it from that customer's history.
       </div>
 
-      <div style={{ position: "relative", marginBottom: 12 }}>
-        <Search size={15} color={T.textDim} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search name or phone"
+      <SearchField value={query} onChange={setQuery} placeholder="Search name or phone" style={{ marginBottom: 10 }} />
+
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
+        <button
+          onClick={() => (dateOpen ? setDateOpen(false) : openDates())}
           style={{
-            width: "100%",
-            background: T.surface,
+            background: dateOpen ? T.gold : T.surfaceAlt,
+            color: dateOpen ? T.onGold : T.text,
             border: `1px solid ${T.border}`,
-            borderRadius: 12,
-            padding: "11px 12px 11px 34px",
-            color: T.text,
+            borderRadius: 999,
+            padding: "7px 12px",
             fontFamily: "'DM Sans', sans-serif",
-            fontSize: 13,
-            boxSizing: "border-box",
+            fontWeight: 700,
+            fontSize: 12,
+            cursor: "pointer",
           }}
-        />
+        >
+          <CalendarRange size={12} style={{ marginRight: 5, verticalAlign: -2 }} />
+          {dateOpen ? "Clear dates" : "Search by date"}
+        </button>
       </div>
+
+      {dateOpen && (
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
+          <DateRange
+            range={range}
+            min={floor}
+            max={today}
+            onChange={setRange}
+            caption={
+              range.from === range.to
+                ? `${formatDate(range.from)} only`
+                : `${formatDate(range.from)} — ${formatDate(range.to)} · set both to the same day for one date`
+            }
+          />
+        </div>
+      )}
 
       <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: T.textDim, marginBottom: 14 }}>
         {log.shown} {log.shown === 1 ? "visit" : "visits"}
-        {showAll ? " · all time" : ` · last ${DEFAULT_WINDOW_DAYS} days`}
+        {dateOpen
+          ? ` · ${formatDate(range.from)} — ${formatDate(range.to)}`
+          : showAll
+            ? " · all time"
+            : ` · last ${DEFAULT_WINDOW_DAYS} days`}
         {log.total !== log.matching && ` · filtered from ${log.total}`}
       </div>
 
       {log.groups.length === 0 && (
-        <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: T.textDim, textAlign: "center", marginTop: 40 }}>
-          {query ? `No visits match “${query}”.` : "No visits recorded in this period."}
+        <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: T.textDim, textAlign: "center", marginTop: 40, lineHeight: 1.6 }}>
+          {query
+            ? `No visits match “${query}”${dateOpen ? " in those dates" : ""}.`
+            : dateOpen
+              ? `No visits between ${formatDate(range.from)} and ${formatDate(range.to)}.`
+              : "No visits recorded in this period."}
         </div>
       )}
 
@@ -90,6 +142,7 @@ export default function VisitLog({ customers, deleteVisit, openCustomer, embedde
             </span>
           </div>
 
+          <div style={cardGrid(layout, { gap: 8 })}>
           {group.entries.map(({ customer, date }) => (
             <div
               key={`${customer.id}-${date}`}
@@ -101,7 +154,6 @@ export default function VisitLog({ customers, deleteVisit, openCustomer, embedde
                 border: `1px solid ${T.border}`,
                 borderRadius: 14,
                 padding: "9px 11px",
-                marginBottom: 8,
               }}
             >
               <button
@@ -138,10 +190,11 @@ export default function VisitLog({ customers, deleteVisit, openCustomer, embedde
               </button>
             </div>
           ))}
+          </div>
         </div>
       ))}
 
-      {!showAll && log.olderHidden > 0 && (
+      {!dateOpen && !showAll && log.olderHidden > 0 && (
         <button
           onClick={() => setShowAll(true)}
           style={{

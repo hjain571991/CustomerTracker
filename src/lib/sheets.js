@@ -10,6 +10,15 @@
  * rules, so the browser skips the preflight that Apps Script cannot answer.
  */
 
+/**
+ * The lowest `SCRIPT_VERSION` in google-apps-script/Code.gs that can hold
+ * everything this build writes. Version 5 added the tiers tab and the customer
+ * tier columns, on top of version 4's reps tab, company / marketing-rep columns
+ * and `is_done` on reminders — an older deployment silently drops whichever of
+ * those it predates, so it is worth saying so out loud.
+ */
+export const REQUIRED_SCRIPT_VERSION = 5;
+
 const CONFIG_KEY = "cvt.sheet.v1";
 const SEEDED_KEY = "cvt.sheet.seeded.v1";
 const TIMEOUT_MS = 20000;
@@ -79,7 +88,17 @@ async function readReply(res) {
   const body = await res.text();
   try {
     const parsed = JSON.parse(body);
-    if (!parsed.ok) throw new SheetError(parsed.error || "The sheet rejected the request.");
+    if (!parsed.ok) {
+      // The deployment is running a Code.gs from before this build's tabs and
+      // columns existed. Saying which file to repaste beats "Unknown tab".
+      if (/^Unknown (tab|op)/i.test(parsed.error || "")) {
+        throw new SheetError(
+          `The sheet's script is out of date (${parsed.error}). Paste the latest google-apps-script/Code.gs ` +
+            "into Extensions → Apps Script, then Deploy → Manage deployments → ✏ → New version → Deploy."
+        );
+      }
+      throw new SheetError(parsed.error || "The sheet rejected the request.");
+    }
     return parsed.data;
   } catch (err) {
     if (err instanceof SheetError) throw err;
@@ -163,6 +182,11 @@ export const customerRow = (c) => ({
   customer_id: c.id,
   name: c.name,
   phone: c.phone || "",
+  company: c.company || "",
+  marketing_rep_id: c.repId || "",
+  marketing_rep: c.repName || "",
+  tier_id: c.tierId || "",
+  tier: c.tierName || "",
   initials: c.initials || "",
   visit_every_weeks: c.visitEveryWeeks || "",
   last_call_date: c.contact?.on || "",
@@ -185,6 +209,20 @@ export const reminderRow = (r, customerName) => ({
   customer_name: customerName || "",
   due_date: r.dueOn,
   note: r.note || "",
+  is_done: r.isDone ? 1 : 0,
+});
+
+export const repRow = (rep) => ({
+  rep_id: rep.id,
+  name: rep.name,
+  is_active: rep.isActive ? 1 : 0,
+});
+
+export const tierRow = (tier) => ({
+  tier_id: tier.id,
+  name: tier.name,
+  rank: tier.rank ?? "",
+  is_active: tier.isActive ? 1 : 0,
 });
 
 /**
@@ -227,4 +265,6 @@ export const changeFor = {
   customer: (c) => ({ tab: "customers", key: "customer_id", row: customerRow(c) }),
   action: (a) => ({ tab: "actions", key: "action_id", row: actionRow(a) }),
   reminder: (r, name) => ({ tab: "reminders", key: "reminder_id", row: reminderRow(r, name) }),
+  rep: (rep) => ({ tab: "reps", key: "rep_id", row: repRow(rep) }),
+  tier: (tier) => ({ tab: "tiers", key: "tier_id", row: tierRow(tier) }),
 };

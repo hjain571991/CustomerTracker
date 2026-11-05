@@ -1,10 +1,22 @@
-import React, { useMemo, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Clock, Plus, RotateCcw } from "lucide-react";
+import React, { useId, useMemo, useState } from "react";
+import { Check, ChevronDown, ChevronRight, Clock, MessageCircle, Pencil, Plus, RotateCcw } from "lucide-react";
 import { T, tint } from "../theme.js";
 import { buildFollowUps, reasonLabel } from "../lib/followups.js";
 import { formatDate } from "../lib/dates.js";
 import { tradingDaysLeft } from "../lib/weeks.js";
 import Avatar from "../components/Avatar.jsx";
+import Segmented from "../components/Segmented.jsx";
+import Reminders from "./Reminders.jsx";
+import { cardGrid, screenPadding, useLayout } from "../lib/layout.js";
+import { whatsappLink } from "../lib/whatsapp.js";
+import { isOpen, loadCollapsed, saveCollapsed } from "../lib/collapsed.js";
+
+const viewsFor = (reminders) => [
+  { key: "call", label: "To call" },
+  // The badge is what is still outstanding, completed ones excluded — a count
+  // that only ever grows would stop meaning anything.
+  { key: "reminders", label: "All reminders", count: (reminders || []).filter((r) => !r.isDone).length || null },
+];
 
 /**
  * Who to ring, in the order worth ringing them.
@@ -17,21 +29,64 @@ export default function FollowUps({
   customers,
   reminders,
   settings,
+  tiers,
   openCustomer,
   dismissReminder,
+  restoreReminder,
+  deleteReminder,
+  openEditReminder,
   openAddReminder,
   openCalled,
   openSnooze,
   unsnooze,
 }) {
-  const data = useMemo(() => buildFollowUps(customers, reminders, settings), [customers, reminders, settings]);
-  const [open, setOpen] = useState({});
-  const toggle = (key) => setOpen((o) => ({ ...o, [key]: !o[key] }));
+  const layout = useLayout();
+  const [view, setView] = useState("call");
+  const views = useMemo(() => viewsFor(reminders), [reminders]);
+  const data = useMemo(
+    () => buildFollowUps(customers, reminders, settings, { tiers }),
+    [customers, reminders, settings, tiers]
+  );
+
+  // Folded sections are remembered across visits — see `collapsed.js`.
+  const [folds, setFolds] = useState(loadCollapsed);
+  const toggle = (key) =>
+    setFolds((prev) => {
+      const next = { ...prev, [key]: !isOpen(prev, key) };
+      saveCollapsed(next);
+      return next;
+    });
+  /** Everything a Group needs to open, close and remember itself. */
+  const fold = (key) => ({ open: isOpen(folds, key), onToggle: () => toggle(key) });
 
   const daysLeft = tradingDaysLeft();
 
+  // The whole list of reminders is its own screen — the call list is only what
+  // needs doing today, and mixing the two would bury that.
+  if (view === "reminders") {
+    return (
+      <div style={{ ...screenPadding(layout, { bottom: 0 }) }}>
+        <Segmented options={views} value={view} onChange={setView} />
+        <div style={{ margin: `14px ${-layout.gutter}px 0` }}>
+          <Reminders
+            customers={customers}
+            reminders={reminders}
+            openCustomer={openCustomer}
+            openAddReminder={openAddReminder}
+            openEditReminder={openEditReminder}
+            dismissReminder={dismissReminder}
+            restoreReminder={restoreReminder}
+            deleteReminder={deleteReminder}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ padding: "8px 16px 110px" }}>
+    <div style={screenPadding(layout)}>
+      <Segmented options={views} value={view} onChange={setView} style={{ marginBottom: 14 }} />
+
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
         <div style={{ fontFamily: "'Roboto Slab', serif", fontWeight: 700, fontSize: 20, color: T.text }}>Follow-ups</div>
         <button
@@ -49,13 +104,15 @@ export default function FollowUps({
       </div>
 
       {data.reminders.length > 0 && (
-        <Group title="Reminders you set" count={data.reminders.length} accent={T.gold} alwaysOpen>
+        <Group title="Reminders you set" count={data.reminders.length} accent={T.gold} {...fold("reminders")}>
           {data.reminders.map(({ customer, reminder, status }) => (
             <Row key={reminder.id} customer={customer} accent={status.color} onOpen={() => openCustomer(customer)}>
               <Line color={status.color}>{status.label}</Line>
               {reminder.note && <Line>{reminder.note}</Line>}
               <Actions>
+                <WhatsAppAction customer={customer} />
                 <Action label="Done" icon={Check} onClick={() => dismissReminder(reminder.id)} />
+                <Action label="Edit" icon={Pencil} onClick={() => openEditReminder(reminder)} />
               </Actions>
             </Row>
           ))}
@@ -63,7 +120,7 @@ export default function FollowUps({
       )}
 
       {data.missedLastWeek.length > 0 && (
-        <Group title="Missed last week" count={data.missedLastWeek.length} accent={T.red} alwaysOpen
+        <Group title="Missed last week" count={data.missedLastWeek.length} accent={T.red} {...fold("missedLastWeek")}
                hint="Most recoverable — they have probably just been busy.">
           {data.missedLastWeek.map((e) => (
             <CallRow key={e.customer.id} entry={e} openCustomer={openCustomer} openCalled={openCalled} openSnooze={openSnooze} />
@@ -72,7 +129,7 @@ export default function FollowUps({
       )}
 
       {data.stillAway.length > 0 && (
-        <Group title="Still away" count={data.stillAway.length} accent={T.red} alwaysOpen
+        <Group title="Still away" count={data.stillAway.length} accent={T.red} {...fold("stillAway")}
                hint="Least time away first — those are the ones a call can still save.">
           {data.stillAway.map((e) => (
             <CallRow key={e.customer.id} entry={e} openCustomer={openCustomer} openCalled={openCalled} openSnooze={openSnooze} />
@@ -81,8 +138,7 @@ export default function FollowUps({
       )}
 
       {data.cameBack.length > 0 && (
-        <Group title="Came back after your call" count={data.cameBack.length} accent={T.green}
-               open={open.cameBack} onToggle={() => toggle("cameBack")}>
+        <Group title="Came back after your call" count={data.cameBack.length} accent={T.green} {...fold("cameBack")}>
           {data.cameBack.map((e) => (
             <Row key={e.customer.id} customer={e.customer} accent={T.green} onOpen={() => openCustomer(e.customer)}>
               <Line color={T.green}>Came in after you rang on {formatDate(e.customer.contact.on)}</Line>
@@ -92,8 +148,7 @@ export default function FollowUps({
       )}
 
       {data.called.length > 0 && (
-        <Group title="Called this week" count={data.called.length} accent={T.blue}
-               open={open.called} onToggle={() => toggle("called")}>
+        <Group title="Called this week" count={data.called.length} accent={T.blue} {...fold("called")}>
           {data.called.map((e) => (
             <Row key={e.customer.id} customer={e.customer} accent={T.blue} onOpen={() => openCustomer(e.customer)}>
               <Line color={T.blue}>
@@ -106,8 +161,7 @@ export default function FollowUps({
       )}
 
       {data.snoozed.length > 0 && (
-        <Group title="Snoozed" count={data.snoozed.length} accent={T.textDim}
-               open={open.snoozed} onToggle={() => toggle("snoozed")}>
+        <Group title="Snoozed" count={data.snoozed.length} accent={T.textDim} {...fold("snoozed")}>
           {data.snoozed.map((e) => (
             <Row key={e.customer.id} customer={e.customer} accent={T.border} onOpen={() => openCustomer(e.customer)}>
               <Line>{e.status.label}</Line>
@@ -120,8 +174,7 @@ export default function FollowUps({
       )}
 
       {data.neverReturned.length > 0 && (
-        <Group title="Never came back" count={data.neverReturned.length} accent={T.grey}
-               open={open.never} onToggle={() => toggle("never")}
+        <Group title="Never came back" count={data.neverReturned.length} accent={T.grey} {...fold("neverReturned")}
                hint="One or two visits and gone. A different conversation to a lapsed regular.">
           {data.neverReturned.map((e) => (
             <CallRow key={e.customer.id} entry={e} openCustomer={openCustomer} openCalled={openCalled} openSnooze={openSnooze} />
@@ -142,12 +195,28 @@ export default function FollowUps({
 
 /* ---------------- pieces ---------------- */
 
-function Group({ title, count, accent, hint, children, alwaysOpen, open, onToggle }) {
-  const expanded = alwaysOpen || open;
+/**
+ * One foldable section of the call list.
+ *
+ * Every section folds, including the three that carry today's work. On a long
+ * Monday "Still away" can run to forty cards, which buries the two people who
+ * only missed last week — being able to put it away is the difference between
+ * a list you work through and one you scroll past.
+ *
+ * The count stays on the header when folded, so a closed section still says
+ * how much is behind it and nothing disappears silently.
+ */
+function Group({ title, count, accent, hint, children, open, onToggle }) {
+  const layout = useLayout();
+  // Ties the header to the panel it controls, for screen readers.
+  const bodyId = useId();
+
   return (
-    <div style={{ marginBottom: 18 }}>
+    <div style={{ marginBottom: open ? 18 : 10 }}>
       <button
-        onClick={alwaysOpen ? undefined : onToggle}
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-controls={bodyId}
         style={{
           width: "100%",
           display: "flex",
@@ -155,13 +224,12 @@ function Group({ title, count, accent, hint, children, alwaysOpen, open, onToggl
           gap: 8,
           background: "none",
           border: "none",
-          padding: "0 0 8px 2px",
-          cursor: alwaysOpen ? "default" : "pointer",
+          padding: "6px 2px 8px",
+          cursor: "pointer",
           textAlign: "left",
         }}
       >
-        {!alwaysOpen &&
-          (expanded ? <ChevronDown size={15} color={T.textDim} /> : <ChevronRight size={15} color={T.textDim} />)}
+        {open ? <ChevronDown size={15} color={T.textDim} /> : <ChevronRight size={15} color={T.textDim} />}
         <span style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 700, fontSize: 11, letterSpacing: 0.6, color: T.textDim, textTransform: "uppercase" }}>
           {title}
         </span>
@@ -169,12 +237,23 @@ function Group({ title, count, accent, hint, children, alwaysOpen, open, onToggl
           {count}
         </span>
       </button>
-      {expanded && hint && (
-        <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: T.textDim, margin: "-2px 0 10px 2px", lineHeight: 1.5 }}>
-          {hint}
-        </div>
-      )}
-      {expanded && children}
+      {/*
+        The panel stays in the document even when folded, so `aria-controls`
+        always points at something real; its rows do not, so a closed section
+        costs nothing to render.
+      */}
+      <div id={bodyId} hidden={!open}>
+        {open && (
+          <>
+            {hint && (
+              <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: T.textDim, margin: "-2px 0 10px 2px", lineHeight: 1.5 }}>
+                {hint}
+              </div>
+            )}
+            <div style={cardGrid(layout, { gap: 9 })}>{children}</div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -188,12 +267,24 @@ function Row({ customer, accent, onOpen, children }) {
         borderLeft: `3px solid ${accent}`,
         borderRadius: 14,
         padding: "11px 13px",
-        marginBottom: 9,
       }}
     >
-      <button
+      {/*
+        A div with a role rather than a <button>: the actions nested inside it
+        include a real <a> for WhatsApp, and an anchor inside a button is
+        invalid HTML that browsers quietly drop.
+      */}
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onOpen}
-        style={{ display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", padding: 0, width: "100%", cursor: "pointer", textAlign: "left" }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        }}
+        style={{ display: "flex", alignItems: "center", gap: 11, width: "100%", cursor: "pointer", textAlign: "left" }}
       >
         <Avatar customer={customer} size={38} ring={accent} />
         <span style={{ flex: 1, minWidth: 0 }}>
@@ -202,7 +293,7 @@ function Row({ customer, accent, onOpen, children }) {
           </span>
           {children}
         </span>
-      </button>
+      </div>
     </div>
   );
 }
@@ -216,6 +307,49 @@ const Line = ({ color, children }) => (
 const Actions = ({ children }) => (
   <span style={{ display: "flex", gap: 8, marginTop: 9 }}>{children}</span>
 );
+
+/**
+ * WhatsApp for one customer.
+ *
+ * A real link, not a button with a handler: it has to be a link for the phone
+ * to hand it to the WhatsApp app rather than opening a tab. It opens the chat
+ * — WhatsApp publishes no URL that starts a voice call — so it is labelled for
+ * what it does, with the call a tap away once the chat is open.
+ *
+ * Nothing is shown at all when the number cannot be made into a WhatsApp one;
+ * a dead button is worse than no button on a shop floor.
+ */
+function WhatsAppAction({ customer }) {
+  const href = whatsappLink(customer.phone);
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      aria-label={`Message ${customer.name} on WhatsApp`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        background: tint(T.green, 0.14),
+        border: `1px solid ${tint(T.green, 0.3)}`,
+        borderRadius: 999,
+        padding: "6px 12px",
+        fontFamily: "'DM Sans', sans-serif",
+        fontWeight: 700,
+        fontSize: 12,
+        color: T.green,
+        textDecoration: "none",
+        cursor: "pointer",
+      }}
+    >
+      <MessageCircle size={13} color={T.green} />
+      WhatsApp
+    </a>
+  );
+}
 
 function Action({ label, icon: Icon, onClick, accent = T.textDim }) {
   return (
@@ -277,6 +411,7 @@ function CallRow({ entry, openCustomer, openCalled, openSnooze }) {
         <Line>Last time: {reasonLabel(customer.contact.reason)} ({formatDate(customer.contact.on)})</Line>
       )}
       <Actions>
+        <WhatsAppAction customer={customer} />
         <Action label="Called" icon={Check} onClick={() => openCalled(customer)} accent={T.gold} />
         <Action label="Snooze" icon={Clock} onClick={() => openSnooze(customer)} />
       </Actions>

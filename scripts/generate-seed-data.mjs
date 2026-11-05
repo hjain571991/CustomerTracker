@@ -39,15 +39,59 @@ const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
 const between = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
 const jitter = (n, pct) => Math.max(1, Math.round(n * (1 + (rnd() * 2 - 1) * pct)));
 
+/* ---- marketing representatives ---- */
+
+// A small team, so the "by rep" report has groups worth comparing rather than
+// one customer each. The last one is retired, to exercise an inactive rep who
+// still has customers against their name.
+const REPS = [
+  { id: 1, name: "Priya Shah", active: true },
+  { id: 2, name: "Anil Kumar", active: true },
+  { id: 3, name: "Farah Qureshi", active: true },
+  { id: 4, name: "Vikram Rao", active: false },
+];
+const activeRepIds = REPS.filter((r) => r.active).map((r) => r.id);
+
+/** Roughly one in eight is left unassigned, so the report has a gap to show. */
+const assignRep = () => (rnd() < 0.12 ? "" : pick(activeRepIds));
+
+const COMPANY_SUFFIX = ["Retail Pvt Ltd", "Enterprises", "& Co Pvt Ltd", "Trading Co", "Retail LLP"];
+
+/* ---- customer tiers ---- */
+
+// Rank 1 is the most important. Deliberately a short list: tiers only ever
+// break ties on the call list, so a long one would split hairs it cannot act
+// on. The retired one exercises a tier that still has customers against it.
+const TIERS = [
+  { id: 1, name: "Key account", rank: 1, active: true },
+  { id: 2, name: "Regular", rank: 2, active: true },
+  { id: 3, name: "Occasional", rank: 3, active: true },
+  { id: 4, name: "Trial", rank: null, active: false },
+];
+const activeTierIds = TIERS.filter((t) => t.active).map((t) => t.id);
+
+/**
+ * Weighted so most retailers sit in the middle and a fifth are left ungraded —
+ * a book where everyone has a tier is not what the screens will actually meet.
+ */
+const assignTier = () => {
+  const r = rnd();
+  if (r < 0.2) return "";
+  if (r < 0.38) return activeTierIds[0];
+  if (r < 0.78) return activeTierIds[1];
+  return activeTierIds[2];
+};
+
 /* ---- the original six, unchanged ---- */
 
 const seeded = [
-  { name: "Rajesh Traders", phone: "9820011223", every: 2, visits: [2, 16, 29, 44, 58], call: { calledDaysAgo: 5, reason: "notNow", note: "Festival stock not moving yet" } },
-  { name: "Shree Ambika Jewels", phone: "9833344556", every: 1, visits: [1, 8, 15, 23, 30], call: null },
-  { name: "Patel & Sons", phone: "9811122334", every: 1, visits: [38, 40, 70, 72], call: { calledDaysAgo: 6, reason: "price", note: "Says a Zaveri Bazaar supplier is cheaper" } },
-  { name: "Ganesh Ornaments", phone: "9845567788", every: 4, visits: [4], call: { calledDaysAgo: 2, reason: "noAnswer", note: "" } },
-  { name: "Laxmi Gold House", phone: "9822233445", every: 2, visits: [11, 13, 40, 41, 68], call: null },
-  { name: "Vraj Jewellers", phone: "9877766554", every: "", visits: [9, 22, 34, 47, 61], call: { calledDaysAgo: 10, reason: "unhappy", note: "Two pieces came in underweight last time" } },
+  { name: "Rajesh Traders", phone: "9820011223", every: 2, visits: [2, 16, 29, 44, 58], call: { calledDaysAgo: 5, reason: "notNow", note: "Festival stock not moving yet" }, company: "Rajesh Retail Pvt Ltd", rep: 1, tier: 1 },
+  { name: "Shree Ambika Jewels", phone: "9833344556", every: 1, visits: [1, 8, 15, 23, 30], call: null, company: "", rep: 1, tier: 2 },
+  { name: "Patel & Sons", phone: "9811122334", every: 1, visits: [38, 40, 70, 72], call: { calledDaysAgo: 6, reason: "price", note: "Says a Zaveri Bazaar supplier is cheaper" }, company: "Patel Enterprises", rep: 2, tier: 1 },
+  { name: "Ganesh Ornaments", phone: "9845567788", every: 4, visits: [4], call: { calledDaysAgo: 2, reason: "noAnswer", note: "" }, company: "", rep: 2, tier: 3 },
+  { name: "Laxmi Gold House", phone: "9822233445", every: 2, visits: [11, 13, 40, 41, 68], call: null, company: "Laxmi Trading Co", rep: 3, tier: 2 },
+  // Left with the retired rep, so the report has to account for one.
+  { name: "Vraj Jewellers", phone: "9877766554", every: "", visits: [9, 22, 34, 47, 61], call: { calledDaysAgo: 10, reason: "unhappy", note: "Two pieces came in underweight last time" }, company: "", rep: 4, tier: 4 },
 ];
 
 /* ---- generated ---- */
@@ -133,7 +177,19 @@ for (const arch of ARCHETYPES) {
       call = { calledDaysAgo, daysUntilPromised: between(-8, 6) };
     }
 
-    generated.push({ name: makeName(), phone: makePhone(), every: hasTarget ? weeks : "", visits, call });
+    const name = makeName();
+    generated.push({
+      name,
+      phone: makePhone(),
+      // Only some retailers trade under a separate company name — it is an
+      // optional field, and the sample should show it as one.
+      company: rnd() < 0.4 ? `${name.split(" ")[0]} ${pick(COMPANY_SUFFIX)}` : "",
+      rep: assignRep(),
+      tier: assignTier(),
+      every: hasTarget ? weeks : "",
+      visits,
+      call,
+    });
   }
 }
 
@@ -153,6 +209,9 @@ const wonBack = [
   return {
     name: w.name,
     phone: makePhone(),
+    company: "",
+    rep: assignRep(),
+    tier: assignTier(),
     every: w.weeks,
     visits: [w.cameBackDaysAgo, ...before],
     call: { calledDaysAgo: w.calledDaysAgo, reason: w.reason, note: w.note },
@@ -174,6 +233,9 @@ const snoozedExamples = [
   return {
     name: x.name,
     phone: makePhone(),
+    company: "",
+    rep: assignRep(),
+    tier: assignTier(),
     every: x.weeks,
     visits: [first, first + x.weeks * 7, first + x.weeks * 14, first + x.weeks * 21],
     call: { calledDaysAgo: x.calledDaysAgo, reason: "notNow", note: x.note },
@@ -204,7 +266,21 @@ const reminderTargets = [customers[4], customers[1], ...Array.from({ length: 7 }
 const seenReminder = new Set();
 const reminders = reminderTargets
   .filter((c) => c && !seenReminder.has(c.name) && seenReminder.add(c.name))
-  .map((c) => ({ customer: c.name, dueInDays: between(-9, 10), note: pick(NOTES) }));
+  .map((c) => ({ customer: c.name, dueInDays: between(-9, 10), note: pick(NOTES), done: false }));
+
+/**
+ * Reminders already ticked off, and a couple set well ahead. The Reminders
+ * screen groups into overdue / today / upcoming / completed, and a sample with
+ * only the first two would leave half of it empty.
+ */
+const extraReminders = [
+  { customer: customers[0].name, dueInDays: -21, note: "Rang about the Diwali order", done: true },
+  { customer: customers[2].name, dueInDays: -14, note: "Sent the new rate card", done: true },
+  { customer: customers[4].name, dueInDays: -5, note: "Quoted for the bangle set", done: true },
+  { customer: customers[1].name, dueInDays: 21, note: "Check in before the wedding season", done: false },
+  { customer: customers[5].name, dueInDays: 34, note: "Quarterly catch-up", done: false },
+];
+reminders.push(...extraReminders);
 
 /* ---- write ---- */
 
@@ -219,12 +295,20 @@ customers.forEach((c, i) => {
   c.id = i + 1;
 });
 
+const repNameById = new Map(REPS.map((r) => [r.id, r.name]));
+const tierNameById = new Map(TIERS.map((t) => [t.id, t.name]));
+
 const customersCsv = toCsv(
-  ["customer_id", "name", "phone", "initials", "visit_every_weeks", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
+  ["customer_id", "name", "phone", "company", "marketing_rep_id", "marketing_rep", "tier_id", "tier", "initials", "visit_every_weeks", "last_call_date", "last_call_reason", "last_call_note", "snoozed_until"],
   customers.map((c) => [
     c.id,
     c.name,
     c.phone,
+    c.company || "",
+    c.rep || "",
+    c.rep ? repNameById.get(c.rep) : "",
+    c.tier || "",
+    c.tier ? tierNameById.get(c.tier) : "",
     "", // blank => derived from the name
     c.every, // weeks; blank => falls back to the app-wide default
     c.call ? iso(c.call.calledDaysAgo) : "",
@@ -248,14 +332,34 @@ const actionsCsv = toCsv(
 
 const idByName = new Map(customers.map((c) => [c.name, c.id]));
 const remindersCsv = toCsv(
-  ["reminder_id", "customer_id", "customer_name", "due_date", "note"],
-  reminders.map((r, i) => [`r${i + 1}`, idByName.get(r.customer) || "", r.customer, iso(-r.dueInDays), r.note])
+  ["reminder_id", "customer_id", "customer_name", "due_date", "note", "is_done"],
+  reminders.map((r, i) => [
+    `r${i + 1}`,
+    idByName.get(r.customer) || "",
+    r.customer,
+    iso(-r.dueInDays),
+    r.note,
+    r.done ? 1 : 0,
+  ])
+);
+
+const repsCsv = toCsv(
+  ["rep_id", "name", "is_active"],
+  REPS.map((r) => [r.id, r.name, r.active ? 1 : 0])
+);
+
+const tiersCsv = toCsv(
+  ["tier_id", "name", "rank", "is_active"],
+  TIERS.map((t) => [t.id, t.name, t.rank ?? "", t.active ? 1 : 0])
 );
 
 mkdirSync(dataDir, { recursive: true });
 writeFileSync(resolve(dataDir, "customers.csv"), customersCsv);
 writeFileSync(resolve(dataDir, "actions.csv"), actionsCsv);
 writeFileSync(resolve(dataDir, "reminders.csv"), remindersCsv);
+writeFileSync(resolve(dataDir, "reps.csv"), repsCsv);
+writeFileSync(resolve(dataDir, "tiers.csv"), tiersCsv);
 console.log(
-  `Seeded ${customers.length} customers, ${actionSeq} actions and ${reminders.length} reminders (anchored to ${iso(0)})`
+  `Seeded ${customers.length} customers, ${actionSeq} actions, ${reminders.length} reminders, ` +
+    `${REPS.length} representatives and ${TIERS.length} tiers (anchored to ${iso(0)})`
 );

@@ -25,9 +25,20 @@ function dayLabel(iso, now) {
 /**
  * @param windowDays  how far back to include; null for everything
  * @param query       matches customer name or phone
+ * @param from/to     inclusive ISO bounds on the visit date; either may be
+ *                    omitted. A range is an explicit choice of period, so it
+ *                    replaces the rolling window rather than narrowing it —
+ *                    asking for last March and getting nothing because it
+ *                    falls outside the last 30 days would be a bug, not a
+ *                    filter.
  */
-export function buildVisitLog(customers, { windowDays = DEFAULT_WINDOW_DAYS, query = "" } = {}, now = new Date()) {
+export function buildVisitLog(
+  customers,
+  { windowDays = DEFAULT_WINDOW_DAYS, query = "", from = null, to = null } = {},
+  now = new Date()
+) {
   const q = query.trim().toLowerCase();
+  const ranged = Boolean(from || to);
 
   const all = [];
   for (const customer of customers) {
@@ -36,11 +47,16 @@ export function buildVisitLog(customers, { windowDays = DEFAULT_WINDOW_DAYS, que
     }
   }
 
-  const matching = q
+  const byText = q
     ? all.filter((e) => e.customer.name.toLowerCase().includes(q) || (e.customer.phone || "").includes(q))
     : all;
 
-  const within = windowDays === null ? matching : matching.filter((e) => e.age !== null && e.age <= windowDays);
+  const matching = ranged
+    ? byText.filter((e) => (!from || e.date >= from) && (!to || e.date <= to))
+    : byText;
+
+  const within =
+    ranged || windowDays === null ? matching : matching.filter((e) => e.age !== null && e.age <= windowDays);
 
   // Newest day first; within a day, alphabetical so the order is stable.
   within.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.customer.name.localeCompare(b.customer.name)));
