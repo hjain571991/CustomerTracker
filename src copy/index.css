@@ -1,0 +1,175 @@
+:root {
+  color-scheme: dark;
+  -webkit-tap-highlight-color: transparent;
+
+  /*
+   * The notch, the rounded corners and the home indicator, as variables.
+   *
+   * `viewport-fit=cover` plus a translucent status bar means an installed iOS
+   * app draws edge to edge — including *under* the clock and the home bar. The
+   * insets say how much of each edge is spoken for; naming them here keeps the
+   * fallback in one place and lets a test stand in different values.
+   */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #0A0B0C;
+  color: #f3f5f7;
+  font-family: "DM Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* The app owns its own scrolling; the page itself must not rubber-band. */
+  overscroll-behavior: none;
+}
+
+body {
+  /* `dvh` tracks the shrinking address bar; `vh` is the fallback for anything
+     that predates it, and must come first so the newer rule wins. */
+  min-height: 100vh;
+  min-height: 100dvh;
+  /* An installed iOS app has no browser chrome to scroll away, so the page
+     itself must never scroll — only the app's own panes do. */
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+}
+
+/*
+ * The app frame's height, as a cascade rather than a single value: a browser
+ * without `dvh` keeps the `vh` line, and one with it takes the second. An
+ * inline style cannot express that — it has one slot per property — which is
+ * why this lives here and not in Shell.
+ *
+ * `dvh` matters on iOS Safari, where `100vh` is the height the page *would*
+ * have with the address bar hidden, so a `vh`-sized app hangs off the bottom.
+ */
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+}
+
+button {
+  font: inherit;
+  touch-action: manipulation;
+}
+
+input,
+textarea {
+  font: inherit;
+  /* 16px keeps iOS Safari from zooming in when a field is focused. */
+  font-size: max(16px, 1em);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #6b727c;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: 2px solid #e6b95c;
+  outline-offset: 2px;
+}
+
+code {
+  font-family: "Roboto Mono", ui-monospace, monospace;
+  font-size: 0.92em;
+}
+
+/* Thin, dark scrollbar so the desktop view still reads as a phone. */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2c3036;
+  border-radius: 3px;
+}
+
+/*
+ * Paper.
+ *
+ * The app is near-black by design; printed, that is a waste of a cartridge and
+ * barely readable. So the print sheet is its own document — white, black text,
+ * portal-mounted straight onto <body> — and printing simply hides the app and
+ * lets that document flow down the page.
+ *
+ * It is the same markup on screen and on paper, so the preview is honest: what
+ * the owner sees in the overlay is what comes out of the printer.
+ */
+@media print {
+  html,
+  body {
+    position: static;
+    overflow: visible;
+    background: #fff;
+    color: #000;
+  }
+
+  /* The app itself, and anything floating over it, has no business on paper. */
+  body > #root {
+    display: none !important;
+  }
+
+  .print-root {
+    position: static !important;
+    inset: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+    padding: 0 !important;
+  }
+
+  /* The preview chrome — close button, layout picker, Print button. */
+  .print-chrome {
+    display: none !important;
+  }
+
+  .print-paper {
+    box-shadow: none !important;
+    margin: 0 !important;
+    border: 0 !important;
+    width: auto !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* One representative per sheet of paper, so they tear apart cleanly. */
+  .print-sheet {
+    break-after: page;
+    page-break-after: always;
+  }
+  .print-sheet:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  /* A customer split across two pages is unreadable on the phone. */
+  .print-entry,
+  .print-row,
+  .print-group-head {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .print-group-head {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  @page {
+    size: A4 portrait;
+    margin: 12mm 12mm 14mm;
+  }
+}

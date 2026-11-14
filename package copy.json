@@ -1,0 +1,27 @@
+{
+  "name": "customer-visit-tracker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Visit-rhythm tracker for a jewellery shop \u2014 staff tap when a customer walks in, owner sees who's overdue.",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/generate-icons.mjs && vite build",
+    "preview": "vite preview --host",
+    "test": "node scripts/smoke-test.mjs && node scripts/data-test.mjs",
+    "icons": "node scripts/generate-icons.mjs",
+    "seed": "node scripts/generate-seed-data.mjs",
+    "clean-lock": "node scripts/clean-lockfile.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "^0.460.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11",
+    "vite-plugin-pwa": "^0.21.1"
+  }
+}
